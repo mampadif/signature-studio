@@ -1,17 +1,26 @@
 # signature.py
 """
-🖊️ Signature Studio
-- Upload a photo of your signature → remove white background → transparent PNG
-- Generate a cursive signature from your name
-- Practice drawing with a canvas
-- Free preview with watermark; one‑time payment removes watermark.
+🖊️ Signature Studio – Fast, Transparent, Monetized
+- Upload signature photo → remove background → transparent PNG
+- Generate cursive signature from name
+- Practice canvas with checkerboard transparency preview
+- Free watermark preview; one‑time payment (Stripe/PayPal) or unlock code
+- Optimized with NumPy for speed (falls back to pure PIL)
 """
 
 import streamlit as st
 import io
 import base64
 import os
-from PIL import Image, ImageDraw, ImageFont
+import time
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+# Try to import numpy for fast background removal
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
 
 # Optional: Stripe integration
 try:
@@ -34,7 +43,6 @@ st.set_page_config(page_title="Signature Studio", page_icon="🖊️", layout="w
 # ---------------------------
 st.markdown("""
 <style>
-    /* Import Google Fonts */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     
     html, body, [class*="css"] {
@@ -89,38 +97,6 @@ st.markdown("""
         color: #718096;
     }
     
-    .btn-stripe {
-        background: #635BFF;
-        color: white;
-        border: none;
-        padding: 0.75rem 1.5rem;
-        border-radius: 40px;
-        font-weight: 600;
-        width: 100%;
-        transition: all 0.2s;
-    }
-    
-    .btn-stripe:hover {
-        background: #4f46e5;
-        transform: scale(1.02);
-    }
-    
-    .btn-paypal {
-        background: #0070ba;
-        color: white;
-        border: none;
-        padding: 0.75rem 1.5rem;
-        border-radius: 40px;
-        font-weight: 600;
-        width: 100%;
-        transition: all 0.2s;
-    }
-    
-    .btn-paypal:hover {
-        background: #005ea6;
-        transform: scale(1.02);
-    }
-    
     .watermark-badge {
         background: #fed7d7;
         color: #c53030;
@@ -163,7 +139,6 @@ st.markdown("""
         margin: 1rem 0;
     }
     
-    /* Dark mode adjustments */
     @media (prefers-color-scheme: dark) {
         .feature-card {
             background: #1e293b;
@@ -189,7 +164,6 @@ PAYPAL_EMAIL = st.secrets.get("PAYPAL_EMAIL", "mampadif@gmail.com")
 APP_URL = st.secrets.get("APP_URL", os.getenv("APP_URL", "http://localhost:8501"))
 UNLOCK_CODE_SECRET = st.secrets.get("UNLOCK_CODE", os.getenv("UNLOCK_CODE", "signature2026"))
 
-# Build PayPal.me link with amount
 PAYPAL_LINK = f"https://paypal.me/{PAYPAL_EMAIL.split('@')[0]}/3.99" if PAYPAL_EMAIL else "https://paypal.me/mampadif/3.99"
 
 if STRIPE_AVAILABLE and STRIPE_SECRET_KEY:
@@ -201,7 +175,6 @@ if STRIPE_AVAILABLE and STRIPE_SECRET_KEY:
 if "signature_paid" not in st.session_state:
     st.session_state.signature_paid = False
 
-# Check for successful Stripe redirect
 query_params = st.query_params
 if "signature_success" in query_params:
     st.session_state.signature_paid = True
@@ -211,30 +184,77 @@ if "signature_success" in query_params:
 # ---------------------------
 # Helper Functions
 # ---------------------------
-def remove_white_background(image: Image.Image, threshold: int = 240) -> Image.Image:
-    """Convert white/near-white pixels to transparent."""
-    image = image.convert("RGBA")
-    data = image.getdata()
-    new_data = []
-    for item in data:
-        if item[0] > threshold and item[1] > threshold and item[2] > threshold:
-            new_data.append((255, 255, 255, 0))
-        else:
-            new_data.append(item)
-    image.putdata(new_data)
-    return image
+def smart_resize_for_processing(image: Image.Image, max_pixels: int = 1200) -> Image.Image:
+    """Resize image if larger than max_pixels to speed up processing."""
+    width, height = image.size
+    if max(width, height) > max_pixels:
+        ratio = max_pixels / max(width, height)
+        new_size = (int(width * ratio), int(height * ratio))
+        return image.resize(new_size, Image.Resampling.LANCZOS)
+    return image.copy()
 
-def resize_for_document(image: Image.Image, max_width: int = 400, max_height: int = 150) -> Image.Image:
-    """Resize image to fit typical signature placeholder (maintains aspect ratio)."""
-    image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
-    return image
+def remove_white_background_fast(image: Image.Image, threshold: int = 240) -> Image.Image:
+    """Remove white/near-white pixels. Uses NumPy if available for speed."""
+    image = image.convert("RGBA")
+    
+    if HAS_NUMPY:
+        arr = np.array(image)
+        white_mask = (arr[:,:,0] > threshold) & (arr[:,:,1] > threshold) & (arr[:,:,2] > threshold)
+        arr[white_mask, 3] = 0
+        return Image.fromarray(arr, mode="RGBA")
+    else:
+        data = image.getdata()
+        new_data = []
+        for item in data:
+            if item[0] > threshold and item[1] > threshold and item[2] > threshold:
+                new_data.append((255, 255, 255, 0))
+            else:
+                new_data.append(item)
+        image.putdata(new_data)
+        return image
+
+def resize_image(image: Image.Image, size_preset: str, custom_width: int = None) -> Image.Image:
+    """Resize based on preset or keep original."""
+    if size_preset == "Original":
+        return image.copy()
+    elif size_preset == "Small":
+        max_size = (300, 100)
+    elif size_preset == "Medium":
+        max_size = (450, 150)
+    elif size_preset == "Large":
+        max_size = (600, 200)
+    elif size_preset == "Custom" and custom_width:
+        max_size = (custom_width, 1000)  # Height will be proportional
+    else:
+        return image.copy()
+    
+    img = image.copy()
+    img.thumbnail(max_size, Image.Resampling.LANCZOS)
+    return img
+
+def create_checkerboard_bg(size: tuple, square_size: int = 15) -> Image.Image:
+    """Create a checkerboard pattern to preview transparency."""
+    bg = Image.new("RGBA", size, (255, 255, 255, 255))
+    draw = ImageDraw.Draw(bg)
+    for y in range(0, size[1], square_size):
+        for x in range(0, size[0], square_size):
+            if (x // square_size + y // square_size) % 2 == 0:
+                draw.rectangle([x, y, x+square_size, y+square_size], fill=(220, 220, 220, 255))
+    return bg
+
+def preview_transparent_image(sig_img: Image.Image) -> Image.Image:
+    """Overlay signature on checkerboard background for clear transparency preview."""
+    bg = create_checkerboard_bg(sig_img.size)
+    bg.paste(sig_img, (0, 0), sig_img)
+    return bg
 
 def add_watermark(image: Image.Image, text: str = "PREVIEW") -> Image.Image:
-    """Add a semi-transparent watermark to the image."""
+    """Add a semi-transparent watermark to the bottom-right."""
     img = image.copy()
     draw = ImageDraw.Draw(img)
     try:
-        font = ImageFont.truetype("arial.ttf", 20)
+        font_size = max(16, img.width // 20)
+        font = ImageFont.truetype("arial.ttf", font_size)
     except:
         font = ImageFont.load_default()
     
@@ -244,7 +264,7 @@ def add_watermark(image: Image.Image, text: str = "PREVIEW") -> Image.Image:
     width, height = img.size
     x = width - text_width - 10
     y = height - text_height - 10
-    draw.text((x, y), text, fill=(200, 200, 200, 180), font=font)
+    draw.text((x, y), text, fill=(128, 128, 128, 180), font=font)
     return img
 
 def get_image_download_link(img: Image.Image, filename: str, text: str) -> str:
@@ -259,10 +279,10 @@ def get_image_download_link(img: Image.Image, filename: str, text: str) -> str:
 def generate_signature_from_text(
     text: str,
     font_style: str = "DancingScript",
-    size: int = 60,
+    size: int = 80,
     color: tuple = (0, 0, 0)
 ) -> Image.Image:
-    """Generate a signature image from text using a cursive font."""
+    """Generate a high-quality signature image from text."""
     font_paths = {
         "DancingScript": "fonts/DancingScript-Regular.ttf",
         "GreatVibes": "fonts/GreatVibes-Regular.ttf",
@@ -283,9 +303,9 @@ def generate_signature_from_text(
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
 
-    img = Image.new("RGBA", (text_width + 40, text_height + 20), (255, 255, 255, 0))
+    img = Image.new("RGBA", (text_width + 60, text_height + 30), (255, 255, 255, 0))
     draw = ImageDraw.Draw(img)
-    draw.text((20, 10), text, fill=color, font=font)
+    draw.text((30, 15), text, fill=color, font=font)
     return img
 
 # ---------------------------
@@ -304,28 +324,27 @@ if not st.session_state.signature_paid:
 else:
     st.markdown('<div class="unlocked-badge">✅ FULL ACCESS — No Watermark</div>', unsafe_allow_html=True)
 
-# Three feature columns for quick overview
+# Three feature cards
 col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown("""
     <div class="feature-card">
         <h3>📸 Capture & Clean</h3>
-        <p>Upload a photo of your signature on white paper. We'll remove the background and give you a transparent PNG ready for documents.</p>
-        <p style="font-size:0.9rem; color:#718096;">💡 <em>Practice on paper first, then snap a photo!</em></p>
+        <p>Upload a photo of your signature. Adjust threshold and size, then download a transparent PNG.</p>
     </div>
     """, unsafe_allow_html=True)
 with col2:
     st.markdown("""
     <div class="feature-card">
         <h3>✍️ Generate from Name</h3>
-        <p>Type your name and choose from elegant cursive fonts. Get a stylized signature instantly.</p>
+        <p>Type your name and choose from elegant cursive fonts. Crisp, high‑quality output.</p>
     </div>
     """, unsafe_allow_html=True)
 with col3:
     st.markdown("""
     <div class="feature-card">
         <h3>🎨 Practice Mode</h3>
-        <p>Use the built‑in canvas to rehearse your signature with mouse or touch before committing.</p>
+        <p>Use the canvas to rehearse. Transparency preview with checkerboard background.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -354,16 +373,16 @@ if not st.session_state.signature_paid:
                 except Exception as e:
                     st.error(f"Stripe error: {e}")
         else:
-            st.info("Stripe not configured. Please use PayPal or contact support.")
+            st.info("Stripe not configured. Use PayPal or contact support.")
     with col_pay2:
         st.markdown(f"""
         <a href="{PAYPAL_LINK}" target="_blank">
-            <button class="btn-paypal" style="width:100%; padding:0.75rem; border-radius:40px; background:#0070ba; color:white; border:none; font-weight:600;">
+            <button style="width:100%; padding:0.75rem; border-radius:40px; background:#0070ba; color:white; border:none; font-weight:600;">
                 🅿️ Pay with PayPal
             </button>
         </a>
         """, unsafe_allow_html=True)
-        st.caption("You'll be redirected to PayPal. After payment, refresh this page to unlock.")
+        st.caption("After payment, refresh this page to unlock.")
     
     # Unlock Code Section
     st.divider()
@@ -379,7 +398,6 @@ if not st.session_state.signature_paid:
                 st.rerun()
             else:
                 st.error("❌ Invalid code.")
-
 else:
     st.success("🎉 You have full access! All downloads are watermark‑free.")
     if st.button("🔓 Sign Out / Reset Access"):
@@ -388,9 +406,10 @@ else:
 
 st.divider()
 
-# Feature Tabs
+# Tabs
 tab1, tab2, tab3 = st.tabs(["📸 Capture & Clean", "✍️ Generate from Name", "🎨 Practice Mode"])
 
+# ----- Tab 1: Upload & Clean (Optimized) -----
 with tab1:
     st.subheader("Upload a photo of your signature")
     st.markdown("""
@@ -398,8 +417,7 @@ with tab1:
         <strong>📝 Tips for best results:</strong><br>
         • Sign on plain <strong>white paper</strong> with a dark pen.<br>
         • Use good lighting — avoid shadows.<br>
-        • Hold your phone steady and get close.<br>
-        • <em>Practice on paper until you're happy, then snap the final version!</em>
+        • Hold your phone steady and get close.
     </div>
     """, unsafe_allow_html=True)
     
@@ -407,17 +425,38 @@ with tab1:
     if uploaded_file:
         image = Image.open(uploaded_file)
         st.image(image, caption="Original", width=300)
+        
+        # Auto-resize for performance
+        image = smart_resize_for_processing(image, max_pixels=1200)
+        
+        col_set1, col_set2 = st.columns(2)
+        with col_set1:
+            threshold = st.slider("White threshold (lower = more aggressive removal)", 180, 255, 240, 5)
+        with col_set2:
+            size_preset = st.selectbox("Output size", ["Original", "Small", "Medium", "Large", "Custom"])
+        
+        custom_width = None
+        if size_preset == "Custom":
+            custom_width = st.number_input("Custom width (pixels)", min_value=100, max_value=1200, value=400, step=50)
+            size_key = "Custom"
+        else:
+            size_key = size_preset.split(" ")[0]
+        
+        if st.button("Process Signature", key="process_upload", type="primary"):
+            start_time = time.time()
+            with st.spinner("Removing background..."):
+                cleaned = remove_white_background_fast(image, threshold)
+                resized = resize_image(cleaned, size_key, custom_width)
+                resized = resized.filter(ImageFilter.SHARPEN)
+                if not st.session_state.signature_paid:
+                    resized = add_watermark(resized)
+                elapsed = time.time() - start_time
+                st.success(f"✅ Done in {elapsed:.2f} seconds")
+                preview = preview_transparent_image(resized)
+                st.image(preview, caption="Processed Signature (checkerboard shows transparency)", width=400)
+                st.markdown(get_image_download_link(resized, "signature.png", "⬇️ Download PNG"), unsafe_allow_html=True)
 
-        with st.spinner("Removing background..."):
-            cleaned = remove_white_background(image)
-            cleaned = resize_for_document(cleaned)
-
-        if not st.session_state.signature_paid:
-            cleaned = add_watermark(cleaned)
-
-        st.image(cleaned, caption="Cleaned Signature", width=300)
-        st.markdown(get_image_download_link(cleaned, "signature.png", "⬇️ Download PNG"), unsafe_allow_html=True)
-
+# ----- Tab 2: Generate from Name -----
 with tab2:
     st.subheader("Generate a signature from your name")
     name = st.text_input("Enter your full name", "John Doe")
@@ -425,21 +464,24 @@ with tab2:
     with col_font1:
         font_choice = st.selectbox("Font Style", ["DancingScript", "GreatVibes", "Pacifico", "AlexBrush"])
     with col_font2:
-        size = st.slider("Size", 30, 120, 60)
+        size = st.slider("Font Size", 40, 150, 80)
     color = st.color_picker("Ink Color", "#000000")
-
+    
     if st.button("Generate Signature", key="generate"):
         sig_img = generate_signature_from_text(name, font_choice, size, color)
+        sig_img = sig_img.filter(ImageFilter.SHARPEN)
         if not st.session_state.signature_paid:
             sig_img = add_watermark(sig_img)
-        st.image(sig_img, caption="Generated Signature", width=300)
+        preview = preview_transparent_image(sig_img)
+        st.image(preview, caption="Generated Signature", width=400)
         st.markdown(get_image_download_link(sig_img, "generated_signature.png", "⬇️ Download PNG"), unsafe_allow_html=True)
         st.caption("Note: This is a stylized text rendering, not a secure digital signature.")
 
+# ----- Tab 3: Practice Mode -----
 with tab3:
     st.subheader("Practice your signature")
-    st.markdown("Draw directly below to practice. Your strokes are converted to a transparent PNG.")
     if CANVAS_AVAILABLE:
+        st.markdown("Draw directly below to practice. Your strokes are converted to a transparent PNG.")
         canvas_result = st_canvas(
             fill_color="rgba(255, 255, 255, 0)",
             stroke_width=3,
@@ -452,11 +494,13 @@ with tab3:
         )
         if canvas_result.image_data is not None:
             img = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
-            cleaned = remove_white_background(img)
-            cleaned = resize_for_document(cleaned)
+            cleaned = remove_white_background_fast(img, threshold=240)
+            cleaned = resize_image(cleaned, "Medium")
+            cleaned = cleaned.filter(ImageFilter.SHARPEN)
             if not st.session_state.signature_paid:
                 cleaned = add_watermark(cleaned)
-            st.image(cleaned, caption="Your Practice Signature", width=300)
+            preview = preview_transparent_image(cleaned)
+            st.image(preview, caption="Your Practice Signature", width=400)
             st.markdown(get_image_download_link(cleaned, "practice_signature.png", "⬇️ Download PNG"), unsafe_allow_html=True)
     else:
         st.warning("Install `streamlit-drawable-canvas` to enable practice mode: `pip install streamlit-drawable-canvas`")

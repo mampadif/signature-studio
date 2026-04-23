@@ -1,22 +1,29 @@
 """
 Signature Studio Pro
-Gemini-first cleanup with automatic local fallback
+Gemini-first signature cleanup with automatic local fallback
 Protected watermark preview for unpaid users
-Reads settings from config.json
+Configuration source: Streamlit Cloud Secrets ONLY
 
-Install:
-    pip install streamlit pillow numpy google-genai
+Required Streamlit secrets:
 
-Run:
-    streamlit run app.py
+GEMINI_API_KEY = "your_key_here"
+GEMINI_MODEL = "gemini-3.1-flash-image-preview"
+APP_NAME = "Signature Studio Pro"
+GEMINI_ENABLED = true
+MAX_GEMINI_CALLS_PER_SESSION = 3
+
+Recommended requirements.txt:
+
+streamlit
+pillow
+numpy
+google-genai>=1.0.0
 """
 
 from __future__ import annotations
 
 import base64
 import io
-import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -30,43 +37,45 @@ try:
 except ImportError:
     HAS_NUMPY = False
 
-from google import genai
-
 
 # =========================================================
 # CONFIG
 # =========================================================
 
-CONFIG_PATH = "config.json"
-
-
 @dataclass
 class AppConfig:
     gemini_api_key: str
     gemini_model: str
-    app_name: str = "Signature Studio Pro"
+    app_name: str
+    gemini_enabled: bool
+    max_calls_per_session: int
 
 
-def load_config(path: str = CONFIG_PATH) -> AppConfig:
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Missing {path}. Create it with GEMINI_API_KEY and GEMINI_MODEL."
+def load_config() -> AppConfig:
+    """
+    Production config loader using Streamlit Cloud Secrets only.
+    """
+    if "GEMINI_API_KEY" not in st.secrets:
+        raise RuntimeError(
+            """
+GEMINI_API_KEY missing in Streamlit secrets.
+
+Add these in Streamlit Cloud -> Manage App -> Secrets:
+
+GEMINI_API_KEY = "your_key_here"
+GEMINI_MODEL = "gemini-3.1-flash-image-preview"
+APP_NAME = "Signature Studio Pro"
+GEMINI_ENABLED = true
+MAX_GEMINI_CALLS_PER_SESSION = 3
+"""
         )
 
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-
-    api_key = raw.get("GEMINI_API_KEY", "").strip()
-    model = raw.get("GEMINI_MODEL", "gemini-3.1-flash-image-preview").strip()
-    app_name = raw.get("APP_NAME", "Signature Studio Pro").strip()
-
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is missing in config.json")
-
     return AppConfig(
-        gemini_api_key=api_key,
-        gemini_model=model or "gemini-3.1-flash-image-preview",
-        app_name=app_name or "Signature Studio Pro",
+        gemini_api_key=st.secrets["GEMINI_API_KEY"],
+        gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
+        app_name=st.secrets.get("APP_NAME", "Signature Studio Pro"),
+        gemini_enabled=bool(st.secrets.get("GEMINI_ENABLED", True)),
+        max_calls_per_session=int(st.secrets.get("MAX_GEMINI_CALLS_PER_SESSION", 3)),
     )
 
 
@@ -84,31 +93,25 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if "paid" not in st.session_state:
-    # Demo switch for SaaS flow. Replace with real payment state later.
-    st.session_state.paid = False
+# Session state
+DEFAULT_SESSION_KEYS = {
+    "paid": False,  # replace later with real payment state
+    "gemini_calls_used": 0,
+    "debug_crop": None,
+    "gemini_result_white": None,
+    "local_result_rgba": None,
+    "final_clean_rgba": None,
+    "method_used": None,
+    "quality_reason": None,
+}
 
-if "debug_crop" not in st.session_state:
-    st.session_state.debug_crop = None
-
-if "gemini_result_white" not in st.session_state:
-    st.session_state.gemini_result_white = None
-
-if "local_result_rgba" not in st.session_state:
-    st.session_state.local_result_rgba = None
-
-if "final_clean_rgba" not in st.session_state:
-    st.session_state.final_clean_rgba = None
-
-if "method_used" not in st.session_state:
-    st.session_state.method_used = None
-
-if "quality_reason" not in st.session_state:
-    st.session_state.quality_reason = None
+for key, value in DEFAULT_SESSION_KEYS.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
 # =========================================================
-# CSS
+# STYLES
 # =========================================================
 
 st.markdown("""
@@ -183,11 +186,32 @@ st.markdown("""
 
 
 # =========================================================
-# GEMINI CLIENT
+# GEMINI HELPERS
 # =========================================================
 
-def get_client() -> genai.Client:
+def get_genai_client():
+    """
+    Lazy import so the app can still run local fallback logic even if
+    google-genai is missing or Gemini is disabled.
+    """
+    if not CONFIG.gemini_enabled:
+        raise RuntimeError("Gemini disabled via configuration.")
+
+    if st.session_state.gemini_calls_used >= CONFIG.max_calls_per_session:
+        raise RuntimeError("Gemini session usage limit reached.")
+
+    try:
+        from google import genai
+    except ImportError as e:
+        raise RuntimeError(
+            "google-genai package missing. Add 'google-genai>=1.0.0' to requirements.txt."
+        ) from e
+
     return genai.Client(api_key=CONFIG.gemini_api_key)
+
+
+def increment_gemini_usage() -> None:
+    st.session_state.gemini_calls_used += 1
 
 
 # =========================================================
@@ -264,7 +288,7 @@ def add_preview_protection(
     preview_max_width: int = 900
 ) -> Image.Image:
     """
-    Watermarked preview designed to reduce screenshot usefulness.
+    Strong preview protection for unpaid users.
     """
     img = image.convert("RGBA").copy()
 
@@ -310,9 +334,7 @@ def add_preview_protection(
 
 
 def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
-    if paid:
-        return image
-    return add_preview_protection(image)
+    return image if paid else add_preview_protection(image)
 
 
 def detect_signature_bbox(
@@ -388,9 +410,9 @@ def ask_gemini_to_clean_signature(
     model_name: str,
 ) -> Image.Image:
     """
-    Ask Gemini to reconstruct the signature cleanly on a white background.
+    Ask Gemini to reconstruct the signature cleanly on white.
     """
-    client = get_client()
+    client = get_genai_client()
 
     prompt = """
 Clean this photographed handwritten signature.
@@ -415,6 +437,8 @@ A clean, crisp, high-resolution version of the same signature on plain white bac
         model=model_name,
         contents=[prompt, cropped_image],
     )
+
+    increment_gemini_usage()
 
     parts = getattr(response, "parts", None)
     if parts:
@@ -729,14 +753,14 @@ def process_signature_with_fallback(
     upscale_final: bool,
 ) -> Tuple[Image.Image, Optional[Image.Image], Image.Image, Image.Image, str, str]:
     """
-    Try Gemini first; fall back to local extraction if Gemini fails or is weak.
+    Try Gemini first; if Gemini fails or result is weak, use local fallback.
     Returns:
-      crop_for_processing,
-      gemini_white_or_none,
-      local_result_rgba,
-      final_clean_rgba,
-      method_used,
-      quality_reason
+        crop_for_processing,
+        gemini_white_or_none,
+        local_result_rgba,
+        final_clean_rgba,
+        method_used,
+        quality_reason
     """
     image = fix_image_orientation(image)
     image = smart_resize_for_processing(image, max_pixels=2400)
@@ -749,12 +773,19 @@ def process_signature_with_fallback(
 
     crop_for_processing = enhance_crop_before_processing(crop, min_width=1200)
 
+    # Always prepare local fallback
     local_rgba = run_local_fallback_pipeline(
         crop_for_processing=crop_for_processing,
         final_padding=final_padding,
         upscale_final=upscale_final,
     )
 
+    # Skip Gemini immediately if disabled or quota reached
+    if (not CONFIG.gemini_enabled) or (st.session_state.gemini_calls_used >= CONFIG.max_calls_per_session):
+        reason = "Gemini unavailable or session limit reached."
+        return crop_for_processing, None, local_rgba, local_rgba, "Local fallback", reason
+
+    # Try Gemini
     try:
         gemini_white, gemini_rgba = run_gemini_pipeline(
             crop_for_processing=crop_for_processing,
@@ -784,8 +815,8 @@ st.markdown(f"""
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
         Gemini-first signature cleanup with automatic local fallback. The app tries Gemini
-        for a cleaner reconstruction, but it automatically falls back to deterministic local
-        extraction if Gemini fails or the result looks weak.
+        for a cleaner reconstruction, then falls back to deterministic local extraction if Gemini
+        fails, is disabled, hits the session cap, or returns a weak result.
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -795,7 +826,7 @@ with c1:
     st.markdown("""
     <div class="card">
         <h3>Gemini first</h3>
-        <p>Uses Gemini image cleanup on a cropped signature region instead of the full photo.</p>
+        <p>Uses Gemini on a cropped signature region instead of the full photo for better cleanup focus.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -803,7 +834,7 @@ with c2:
     st.markdown("""
     <div class="card">
         <h3>Automatic fallback</h3>
-        <p>If Gemini fails or returns a weak extraction, local non-AI cleanup takes over automatically.</p>
+        <p>If Gemini fails, is weak, or is unavailable, local non-AI cleanup takes over automatically.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -811,7 +842,7 @@ with c3:
     st.markdown("""
     <div class="card">
         <h3>Protected preview</h3>
-        <p>Unpaid users see a watermarked preview. Paid users get the clean transparent PNG.</p>
+        <p>Unpaid users see a strong watermarked preview. Paid users get the clean transparent PNG.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -836,7 +867,10 @@ with top_left:
     )
 
 with top_right:
-    st.caption("In unpaid mode, the app shows only a protected preview.")
+    st.caption(
+        f"Gemini calls used this session: {st.session_state.gemini_calls_used} / "
+        f"{CONFIG.max_calls_per_session}"
+    )
 
 uploaded_file = st.file_uploader(
     "Choose signature image",
@@ -866,7 +900,7 @@ if uploaded_file:
     if run_btn:
         start = time.time()
         try:
-            with st.spinner("Trying Gemini first, then falling back automatically if needed..."):
+            with st.spinner("Processing signature..."):
                 (
                     debug_crop,
                     gemini_white,
@@ -901,7 +935,7 @@ if st.session_state.final_clean_rgba is not None:
     st.markdown("---")
     st.info(f"Method used: {st.session_state.method_used} — {st.session_state.quality_reason}")
 
-    preview_image = get_user_visible_preview(
+    user_visible_preview = get_user_visible_preview(
         st.session_state.final_clean_rgba,
         paid=st.session_state.paid
     )
@@ -927,7 +961,7 @@ if st.session_state.final_clean_rgba is not None:
 
     with col_c:
         st.image(
-            preview_transparent_image(preview_image),
+            preview_transparent_image(user_visible_preview),
             caption="3) User-visible preview",
             use_container_width=True
         )

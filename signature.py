@@ -1,23 +1,17 @@
 """
 Signature Studio Pro
-Gemini-first signature cleanup with automatic local fallback
-Protected watermark preview for unpaid users
-Configuration source: Streamlit Cloud Secrets ONLY
+Final corrected version:
+- Produces a tight transparent thumbnail of the signature
+- Gemini-first cleanup with automatic local fallback
+- Protected preview for unpaid users
+- Streamlit secrets only
 
 Required Streamlit secrets:
-
 GEMINI_API_KEY = "your_key_here"
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
 GEMINI_ENABLED = true
 MAX_GEMINI_CALLS_PER_SESSION = 3
-
-Recommended requirements.txt:
-
-streamlit
-pillow
-numpy
-google-genai>=1.0.0
 """
 
 from __future__ import annotations
@@ -52,16 +46,12 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    """
-    Production config loader using Streamlit Cloud Secrets only.
-    """
     if "GEMINI_API_KEY" not in st.secrets:
         raise RuntimeError(
             """
 GEMINI_API_KEY missing in Streamlit secrets.
 
-Add these in Streamlit Cloud -> Manage App -> Secrets:
-
+Add:
 GEMINI_API_KEY = "your_key_here"
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
@@ -93,9 +83,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Session state
 DEFAULT_SESSION_KEYS = {
-    "paid": False,  # replace later with real payment state
+    "paid": False,
     "gemini_calls_used": 0,
     "debug_crop": None,
     "gemini_result_white": None,
@@ -177,10 +166,6 @@ st.markdown("""
     font-size: 0.9rem;
     margin-top: 1.2rem;
 }
-.small-note {
-    color: #667085;
-    font-size: 0.9rem;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -190,10 +175,6 @@ st.markdown("""
 # =========================================================
 
 def get_genai_client():
-    """
-    Lazy import so the app can still run local fallback logic even if
-    google-genai is missing or Gemini is disabled.
-    """
     if not CONFIG.gemini_enabled:
         raise RuntimeError("Gemini disabled via configuration.")
 
@@ -235,7 +216,7 @@ def smart_resize_for_processing(image: Image.Image, max_pixels: int = 2400) -> I
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
 
-def create_checkerboard_bg(size: tuple[int, int], square_size: int = 18) -> Image.Image:
+def create_checkerboard_bg(size: tuple[int, int], square_size: int = 16) -> Image.Image:
     bg = Image.new("RGBA", size, (255, 255, 255, 255))
     draw = ImageDraw.Draw(bg)
     light = (242, 244, 247, 255)
@@ -283,13 +264,10 @@ def add_preview_protection(
     image: Image.Image,
     text: str = "PREVIEW • PAY TO UNLOCK • PREVIEW",
     opacity: int = 70,
-    spacing: int = 180,
+    spacing: int = 160,
     angle: float = -30,
-    preview_max_width: int = 900
+    preview_max_width: int = 700
 ) -> Image.Image:
-    """
-    Strong preview protection for unpaid users.
-    """
     img = image.convert("RGBA").copy()
 
     if img.width > preview_max_width:
@@ -303,7 +281,7 @@ def add_preview_protection(
     draw = ImageDraw.Draw(overlay)
 
     try:
-        font_size = max(22, img.width // 18)
+        font_size = max(18, img.width // 16)
         font = ImageFont.truetype("arial.ttf", font_size)
     except Exception:
         font = ImageFont.load_default()
@@ -340,11 +318,8 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 def detect_signature_bbox(
     image: Image.Image,
     darkness_threshold: int = 150,
-    padding: int = 80,
+    padding: int = 60,
 ) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
-    """
-    Conservative crop around likely ink.
-    """
     rgb = image.convert("RGB")
 
     if HAS_NUMPY:
@@ -409,9 +384,6 @@ def ask_gemini_to_clean_signature(
     cropped_image: Image.Image,
     model_name: str,
 ) -> Image.Image:
-    """
-    Ask Gemini to reconstruct the signature cleanly on white.
-    """
     client = get_genai_client()
 
     prompt = """
@@ -460,8 +432,8 @@ A clean, crisp, high-resolution version of the same signature on plain white bac
 
 def white_to_transparent_soft(
     image: Image.Image,
-    threshold: int = 246,
-    softness: int = 14,
+    threshold: int = 248,
+    softness: int = 10,
 ) -> Image.Image:
     image = image.convert("RGBA")
     soft_start = max(0, threshold - softness)
@@ -541,13 +513,13 @@ def estimate_background_level(image: Image.Image) -> int:
 def remove_paper_background_soft(
     image: Image.Image,
     threshold: Optional[int] = None,
-    softness: int = 22
+    softness: int = 20
 ) -> Tuple[Image.Image, int]:
     image = image.convert("RGBA")
 
     if threshold is None:
         bg_level = estimate_background_level(image)
-        threshold = max(205, min(250, bg_level - 8))
+        threshold = max(210, min(250, bg_level - 6))
 
     soft_start = max(0, threshold - softness)
 
@@ -584,13 +556,19 @@ def remove_paper_background_soft(
     return image, int(threshold)
 
 
-def clean_alpha_noise(image: Image.Image, min_alpha: int = 8) -> Image.Image:
+def clean_alpha_noise(image: Image.Image, min_alpha: int = 20) -> Image.Image:
+    """
+    Stronger cleanup so dirty outline disappears.
+    """
     image = image.convert("RGBA")
 
     if HAS_NUMPY:
         arr = np.array(image, dtype=np.uint8)
         alpha = arr[:, :, 3]
+
         alpha[alpha < min_alpha] = 0
+        alpha[alpha >= 245] = 255
+
         arr[:, :, 3] = alpha
         return Image.fromarray(arr, mode="RGBA")
 
@@ -598,13 +576,18 @@ def clean_alpha_noise(image: Image.Image, min_alpha: int = 8) -> Image.Image:
     for r, g, b, a in image.getdata():
         if a < min_alpha:
             new_data.append((r, g, b, 0))
+        elif a >= 245:
+            new_data.append((r, g, b, 255))
         else:
             new_data.append((r, g, b, a))
     image.putdata(new_data)
     return image
 
 
-def auto_crop_transparent(image: Image.Image, padding: int = 40) -> Image.Image:
+def auto_crop_transparent(image: Image.Image, padding: int = 16) -> Image.Image:
+    """
+    Tight crop around signature only.
+    """
     image = image.convert("RGBA")
     alpha = image.getchannel("A")
     bbox = alpha.getbbox()
@@ -621,16 +604,26 @@ def auto_crop_transparent(image: Image.Image, padding: int = 40) -> Image.Image:
     return image.crop((left, top, right, bottom))
 
 
-def upscale_final_if_small(image: Image.Image, min_width: int = 1000) -> Image.Image:
-    width, height = image.size
-    if width >= min_width:
-        return image
+def remove_empty_margins_twice(image: Image.Image, padding: int = 12) -> Image.Image:
+    """
+    Final trim pass to ensure thumbnail-sized output.
+    """
+    first = auto_crop_transparent(image, padding=padding)
+    second = auto_crop_transparent(first, padding=padding)
+    return second
 
-    ratio = min_width / max(1, width)
-    return image.resize(
-        (int(width * ratio), int(height * ratio)),
-        Image.Resampling.LANCZOS
-    )
+
+def resize_to_signature_thumbnail(
+    image: Image.Image,
+    target_width: int = 700,
+    max_height: int = 250
+) -> Image.Image:
+    """
+    Resize output to a signature-style thumbnail, not a page.
+    """
+    img = image.copy()
+    img.thumbnail((target_width, max_height), Image.Resampling.LANCZOS)
+    return img
 
 
 # =========================================================
@@ -656,9 +649,9 @@ def rgba_ink_bbox(image: Image.Image, alpha_cutoff: int = 20) -> Optional[Tuple[
 
 def score_result_quality(
     image: Image.Image,
-    min_ink_pixels: int = 1200,
-    min_fill_ratio: float = 0.02,
-    max_fill_ratio: float = 0.70,
+    min_ink_pixels: int = 1000,
+    min_fill_ratio: float = 0.03,
+    max_fill_ratio: float = 0.80,
 ) -> Tuple[bool, str]:
     image = image.convert("RGBA")
 
@@ -683,11 +676,11 @@ def score_result_quality(
     if ink_pixels < min_ink_pixels:
         return False, "Too little visible ink after extraction."
     if fill_ratio < min_fill_ratio:
-        return False, "Signature is too faint or too small."
+        return False, "Signature too faint."
     if fill_ratio > max_fill_ratio:
         return False, "Too much non-background content remained."
-    if bbox_w < 80 or bbox_h < 40:
-        return False, "Extracted signature bounds are too small."
+    if bbox_w < 80 or bbox_h < 35:
+        return False, "Signature bounds too small."
 
     return True, "Quality passed."
 
@@ -696,13 +689,26 @@ def score_result_quality(
 # PIPELINES
 # =========================================================
 
+def finalize_signature_thumbnail(image: Image.Image) -> Image.Image:
+    """
+    Final stage:
+    - remove weak halo
+    - crop tightly
+    - crop again
+    - resize to signature thumbnail
+    """
+    image = clean_alpha_noise(image, min_alpha=20)
+    image = remove_empty_margins_twice(image, padding=12)
+    image = resize_to_signature_thumbnail(image, target_width=700, max_height=250)
+    image = remove_empty_margins_twice(image, padding=10)
+    return image
+
+
 def run_gemini_pipeline(
     crop_for_processing: Image.Image,
     model_name: str,
     alpha_threshold: int,
     alpha_softness: int,
-    final_padding: int,
-    upscale_final: bool,
 ) -> Tuple[Image.Image, Image.Image]:
     gemini_white = ask_gemini_to_clean_signature(
         cropped_image=crop_for_processing,
@@ -714,31 +720,20 @@ def run_gemini_pipeline(
         threshold=alpha_threshold,
         softness=alpha_softness,
     )
-    rgba = clean_alpha_noise(rgba, min_alpha=8)
-    rgba = auto_crop_transparent(rgba, padding=final_padding)
-
-    if upscale_final:
-        rgba = upscale_final_if_small(rgba, min_width=1000)
+    rgba = finalize_signature_thumbnail(rgba)
 
     return gemini_white, rgba
 
 
 def run_local_fallback_pipeline(
     crop_for_processing: Image.Image,
-    final_padding: int,
-    upscale_final: bool,
 ) -> Image.Image:
     rgba, _used_threshold = remove_paper_background_soft(
         crop_for_processing,
         threshold=None,
-        softness=22,
+        softness=20,
     )
-    rgba = clean_alpha_noise(rgba, min_alpha=10)
-    rgba = auto_crop_transparent(rgba, padding=final_padding)
-
-    if upscale_final:
-        rgba = upscale_final_if_small(rgba, min_width=1000)
-
+    rgba = finalize_signature_thumbnail(rgba)
     return rgba
 
 
@@ -749,19 +744,7 @@ def process_signature_with_fallback(
     crop_padding: int,
     alpha_threshold: int,
     alpha_softness: int,
-    final_padding: int,
-    upscale_final: bool,
 ) -> Tuple[Image.Image, Optional[Image.Image], Image.Image, Image.Image, str, str]:
-    """
-    Try Gemini first; if Gemini fails or result is weak, use local fallback.
-    Returns:
-        crop_for_processing,
-        gemini_white_or_none,
-        local_result_rgba,
-        final_clean_rgba,
-        method_used,
-        quality_reason
-    """
     image = fix_image_orientation(image)
     image = smart_resize_for_processing(image, max_pixels=2400)
 
@@ -773,27 +756,18 @@ def process_signature_with_fallback(
 
     crop_for_processing = enhance_crop_before_processing(crop, min_width=1200)
 
-    # Always prepare local fallback
-    local_rgba = run_local_fallback_pipeline(
-        crop_for_processing=crop_for_processing,
-        final_padding=final_padding,
-        upscale_final=upscale_final,
-    )
+    local_rgba = run_local_fallback_pipeline(crop_for_processing)
 
-    # Skip Gemini immediately if disabled or quota reached
     if (not CONFIG.gemini_enabled) or (st.session_state.gemini_calls_used >= CONFIG.max_calls_per_session):
         reason = "Gemini unavailable or session limit reached."
         return crop_for_processing, None, local_rgba, local_rgba, "Local fallback", reason
 
-    # Try Gemini
     try:
         gemini_white, gemini_rgba = run_gemini_pipeline(
             crop_for_processing=crop_for_processing,
             model_name=model_name,
             alpha_threshold=alpha_threshold,
             alpha_softness=alpha_softness,
-            final_padding=final_padding,
-            upscale_final=upscale_final,
         )
 
         passed, reason = score_result_quality(gemini_rgba)
@@ -814,9 +788,8 @@ st.markdown(f"""
 <div class="hero">
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
-        Gemini-first signature cleanup with automatic local fallback. The app tries Gemini
-        for a cleaner reconstruction, then falls back to deterministic local extraction if Gemini
-        fails, is disabled, hits the session cap, or returns a weak result.
+        This corrected version outputs a tight transparent thumbnail of the signature only,
+        not a page-sized image. Gemini is tried first, and local fallback is used automatically if needed.
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -825,24 +798,24 @@ c1, c2, c3 = st.columns(3)
 with c1:
     st.markdown("""
     <div class="card">
-        <h3>Gemini first</h3>
-        <p>Uses Gemini on a cropped signature region instead of the full photo for better cleanup focus.</p>
+        <h3>Tight thumbnail output</h3>
+        <p>The final PNG is cropped to the actual signature with small margins only.</p>
     </div>
     """, unsafe_allow_html=True)
 
 with c2:
     st.markdown("""
     <div class="card">
-        <h3>Automatic fallback</h3>
-        <p>If Gemini fails, is weak, or is unavailable, local non-AI cleanup takes over automatically.</p>
+        <h3>Cleaner transparency</h3>
+        <p>Weak dirty outlines are removed more aggressively before the final export.</p>
     </div>
     """, unsafe_allow_html=True)
 
 with c3:
     st.markdown("""
     <div class="card">
-        <h3>Protected preview</h3>
-        <p>Unpaid users see a strong watermarked preview. Paid users get the clean transparent PNG.</p>
+        <h3>Gemini + fallback</h3>
+        <p>Gemini is used first, but a local fallback protects reliability and cost.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -850,11 +823,11 @@ st.markdown("---")
 
 st.markdown("""
 <div class="tip-box">
-<strong>Best photo tips:</strong><br>
+<strong>Best result tips:</strong><br>
 • Take the photo closer so the signature fills more of the frame<br>
 • Use dark ink on plain white paper<br>
-• Avoid blur and strong shadows<br>
-• Keep the phone straight above the page
+• Avoid blur and heavy shadows<br>
+• The final output should now be thumbnail-sized, not page-sized
 </div>
 """, unsafe_allow_html=True)
 
@@ -889,18 +862,16 @@ if uploaded_file:
     with right:
         model_name = st.text_input("Gemini model", value=CONFIG.gemini_model)
         darkness_threshold = st.slider("Ink detection threshold", 100, 190, 150, 2)
-        crop_padding = st.slider("Initial crop padding", 20, 160, 80, 5)
-        alpha_threshold = st.slider("White-to-alpha threshold", 235, 254, 246, 1)
-        alpha_softness = st.slider("Alpha edge softness", 6, 30, 14, 1)
-        final_padding = st.slider("Final transparent padding", 10, 100, 40, 5)
-        upscale_final = st.toggle("Upscale final PNG", value=True)
+        crop_padding = st.slider("Initial crop padding", 20, 140, 60, 5)
+        alpha_threshold = st.slider("White-to-alpha threshold", 240, 254, 248, 1)
+        alpha_softness = st.slider("Alpha edge softness", 4, 20, 10, 1)
 
-        run_btn = st.button("✨ Clean signature", type="primary", use_container_width=True)
+        run_btn = st.button("✨ Create transparent thumbnail", type="primary", use_container_width=True)
 
     if run_btn:
         start = time.time()
         try:
-            with st.spinner("Processing signature..."):
+            with st.spinner("Processing signature thumbnail..."):
                 (
                     debug_crop,
                     gemini_white,
@@ -915,8 +886,6 @@ if uploaded_file:
                     crop_padding=crop_padding,
                     alpha_threshold=alpha_threshold,
                     alpha_softness=alpha_softness,
-                    final_padding=final_padding,
-                    upscale_final=upscale_final,
                 )
 
                 st.session_state.debug_crop = debug_crop
@@ -962,8 +931,8 @@ if st.session_state.final_clean_rgba is not None:
     with col_c:
         st.image(
             preview_transparent_image(user_visible_preview),
-            caption="3) User-visible preview",
-            use_container_width=True
+            caption="3) Final thumbnail preview",
+            use_container_width=False
         )
 
     dl_left, dl_right = st.columns([1, 1])
@@ -973,30 +942,30 @@ if st.session_state.final_clean_rgba is not None:
             st.markdown(
                 pil_png_download_link(
                     st.session_state.final_clean_rgba,
-                    "signature_transparent.png",
-                    "⬇️ Download clean transparent PNG"
+                    "signature_thumbnail.png",
+                    "⬇️ Download clean transparent thumbnail"
                 ),
                 unsafe_allow_html=True,
             )
         else:
-            st.warning("Unlock to download the clean transparent PNG.")
-            st.caption("The preview is intentionally watermarked to discourage screenshot reuse.")
+            st.warning("Unlock to download the clean transparent thumbnail.")
+            st.caption("Preview is watermarked to discourage screenshot reuse.")
 
     with dl_right:
         st.info(
-            f"Final clean size: {st.session_state.final_clean_rgba.width}px × "
+            f"Final size: {st.session_state.final_clean_rgba.width}px × "
             f"{st.session_state.final_clean_rgba.height}px"
         )
 
     with st.expander("Show local fallback result"):
         st.image(
             preview_transparent_image(st.session_state.local_result_rgba),
-            caption="Local fallback transparent preview",
-            use_container_width=True
+            caption="Local fallback thumbnail preview",
+            use_container_width=False
         )
 
 st.markdown("---")
 st.markdown(
-    '<div class="footer-note">Gemini-first cleanup with automatic local fallback and protected previews</div>',
+    '<div class="footer-note">Final corrected version: transparent signature thumbnail output</div>',
     unsafe_allow_html=True
 )

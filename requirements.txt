@@ -38,3 +38,4 @@ watchdog==6.0.0
 pillow
 numpy
 google-genai>=1.0.0
+python-docx

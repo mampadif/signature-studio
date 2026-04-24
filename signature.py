@@ -1,23 +1,17 @@
 """
 Signature Studio Pro
-Goal:
-- Extract ONLY the signature
-- Remove paper/background/texture
-- Output a tight transparent PNG thumbnail
-- Show only the final signature result in the UI
+- Extracts ONLY the signature as a transparent PNG
+- Centers and tightly crops the signature
+- Gemini-first extraction with local fallback
+- Protected preview for unpaid users
+- Adds Word-ready DOCX download for novice users
 
-Required Streamlit secrets:
+Streamlit secrets:
 GEMINI_API_KEY = "your_key_here"
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
 GEMINI_ENABLED = true
 MAX_GEMINI_CALLS_PER_SESSION = 3
-
-requirements.txt:
-streamlit
-pillow
-numpy
-google-genai>=1.0.0
 """
 
 from __future__ import annotations
@@ -29,13 +23,20 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, PngImagePlugin
 
 try:
     import numpy as np
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
+
+try:
+    from docx import Document
+    from docx.shared import Inches
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
 
 
 # =========================================================
@@ -57,8 +58,7 @@ def load_config() -> AppConfig:
             """
 GEMINI_API_KEY missing in Streamlit secrets.
 
-Add this under Streamlit Cloud -> Manage App -> Secrets:
-
+Add:
 GEMINI_API_KEY = "your_key_here"
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
@@ -126,13 +126,11 @@ st.markdown("""
     margin: 0 0 0.5rem 0;
     font-size: 2.35rem;
     font-weight: 800;
-    letter-spacing: -0.03em;
 }
 .hero p {
     margin: 0;
     color: rgba(255,255,255,0.88);
     line-height: 1.6;
-    max-width: 820px;
 }
 .tip-box {
     background: #F8FAFC;
@@ -142,7 +140,6 @@ st.markdown("""
     border-radius: 14px;
     margin-bottom: 1rem;
     color: #334155;
-    line-height: 1.55;
 }
 .result-card {
     background: white;
@@ -163,7 +160,7 @@ st.markdown("""
 
 
 # =========================================================
-# GEMINI HELPERS
+# GEMINI
 # =========================================================
 
 def get_genai_client():
@@ -215,9 +212,6 @@ def detect_signature_bbox(
     darkness_threshold: int = 150,
     padding: int = 25,
 ) -> Image.Image:
-    """
-    Crop close to the dark ink before sending to Gemini.
-    """
     rgb = image.convert("RGB")
 
     if HAS_NUMPY:
@@ -266,9 +260,6 @@ def detect_signature_bbox(
 
 
 def enhance_crop_before_gemini(image: Image.Image, min_width: int = 1200) -> Image.Image:
-    """
-    Enlarge and improve the crop before Gemini reconstruction.
-    """
     img = image.convert("RGB")
 
     if img.width < min_width:
@@ -306,10 +297,23 @@ def preview_transparent_image(sig_img: Image.Image) -> Image.Image:
     return out
 
 
-def pil_png_download_link(img: Image.Image, filename: str, label: str) -> str:
+# =========================================================
+# DOWNLOAD HELPERS
+# =========================================================
+
+def png_bytes_with_metadata(img: Image.Image) -> bytes:
+    meta = PngImagePlugin.PngInfo()
+    meta.add_text("SignatureUse", "Insert as image. In Word/Google Docs, set layout to In Front of Text.")
+    meta.add_text("Background", "Transparent PNG")
+
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
+    img.save(buf, format="PNG", pnginfo=meta)
+    return buf.getvalue()
+
+
+def pil_png_download_link(img: Image.Image, filename: str, label: str) -> str:
+    png_bytes = png_bytes_with_metadata(img)
+    b64 = base64.b64encode(png_bytes).decode()
 
     return f"""
     <a href="data:image/png;base64,{b64}" download="{filename}"
@@ -322,11 +326,69 @@ def pil_png_download_link(img: Image.Image, filename: str, label: str) -> str:
             border-radius:999px;
             font-weight:700;
             font-size:0.95rem;
+            margin:0.25rem;
        ">
        {label}
     </a>
     """
 
+
+def create_word_ready_docx(signature_img: Image.Image) -> bytes:
+    """
+    Creates a simple DOCX containing the transparent signature image.
+    Users can open this docx and copy/paste the image into other Word documents.
+    """
+    if not DOCX_AVAILABLE:
+        raise RuntimeError("python-docx is not installed.")
+
+    doc = Document()
+
+    doc.add_heading("Word-ready signature", level=1)
+    doc.add_paragraph(
+        "Copy this signature image and paste it into your document. "
+        "In Microsoft Word, click the image and choose Layout Options → In Front of Text."
+    )
+
+    img_bytes = png_bytes_with_metadata(signature_img)
+    img_stream = io.BytesIO(img_bytes)
+
+    # Natural signature display size
+    doc.add_picture(img_stream, width=Inches(2.2))
+
+    doc.add_paragraph("")
+    doc.add_paragraph("Tip: Resize from the corner handles to keep the signature proportions.")
+
+    out = io.BytesIO()
+    doc.save(out)
+    out.seek(0)
+    return out.getvalue()
+
+
+def docx_download_link(docx_bytes: bytes, filename: str, label: str) -> str:
+    b64 = base64.b64encode(docx_bytes).decode()
+
+    return f"""
+    <a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}"
+       download="{filename}"
+       style="
+            display:inline-block;
+            text-decoration:none;
+            background:linear-gradient(90deg,#2563EB 0%, #1D4ED8 100%);
+            color:white;
+            padding:0.75rem 1rem;
+            border-radius:999px;
+            font-weight:700;
+            font-size:0.95rem;
+            margin:0.25rem;
+       ">
+       {label}
+    </a>
+    """
+
+
+# =========================================================
+# PREVIEW PROTECTION
+# =========================================================
 
 def add_preview_protection(
     image: Image.Image,
@@ -335,11 +397,7 @@ def add_preview_protection(
     spacing: int = 120,
     angle: float = -30,
 ) -> Image.Image:
-    """
-    Watermark the free preview only.
-    """
     img = image.convert("RGBA").copy()
-
     overlay = Image.new("RGBA", img.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
 
@@ -376,16 +434,13 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 
 
 # =========================================================
-# TRANSPARENCY + FINAL CROP
+# TRANSPARENCY + CENTERED CROP
 # =========================================================
 
 def white_to_transparent_hard(
     image: Image.Image,
     threshold: int = 252,
 ) -> Image.Image:
-    """
-    Aggressively remove pure/near-white Gemini background.
-    """
     image = image.convert("RGBA")
 
     if HAS_NUMPY:
@@ -396,7 +451,6 @@ def white_to_transparent_hard(
         alpha = np.where(brightness >= threshold, 0, 255).astype(np.uint8)
         arr[:, :, 3] = alpha
 
-        # Force visible strokes to solid black
         ink = alpha > 0
         arr[ink, 0] = 0
         arr[ink, 1] = 0
@@ -417,9 +471,6 @@ def white_to_transparent_hard(
 
 
 def remove_small_noise(image: Image.Image, alpha_cutoff: int = 255) -> Image.Image:
-    """
-    Keep only fully visible black strokes.
-    """
     image = image.convert("RGBA")
 
     if HAS_NUMPY:
@@ -439,22 +490,36 @@ def remove_small_noise(image: Image.Image, alpha_cutoff: int = 255) -> Image.Ima
     return image
 
 
-def tight_crop_alpha(image: Image.Image, padding: int = 8) -> Image.Image:
+def tight_crop_alpha(image: Image.Image, padding: int = 6) -> Image.Image:
     image = image.convert("RGBA")
-    alpha = image.getchannel("A")
-    bbox = alpha.getbbox()
+    bbox = image.getchannel("A").getbbox()
 
     if not bbox:
         return image
 
     left, top, right, bottom = bbox
-
     left = max(0, left - padding)
     top = max(0, top - padding)
     right = min(image.width, right + padding)
     bottom = min(image.height, bottom + padding)
 
     return image.crop((left, top, right, bottom))
+
+
+def center_signature_canvas(image: Image.Image) -> Image.Image:
+    """
+    Removes off-center transparent canvas.
+    """
+    image = image.convert("RGBA")
+    bbox = image.getchannel("A").getbbox()
+
+    if not bbox:
+        return image
+
+    cropped = image.crop(bbox)
+    canvas = Image.new("RGBA", cropped.size, (0, 0, 0, 0))
+    canvas.paste(cropped, (0, 0), cropped)
+    return canvas
 
 
 def resize_signature_only(
@@ -469,18 +534,21 @@ def resize_signature_only(
 
 def finalize_signature_only(image: Image.Image) -> Image.Image:
     """
-    Final output:
-    only signature, no page, no large background.
+    Final order matters:
+    clean → tight crop → center → resize LAST → crop again.
     """
     image = remove_small_noise(image, alpha_cutoff=255)
-    image = tight_crop_alpha(image, padding=8)
-    image = resize_signature_only(image, max_width=700, max_height=240)
     image = tight_crop_alpha(image, padding=6)
+    image = tight_crop_alpha(image, padding=4)
+    image = center_signature_canvas(image)
+    image = resize_signature_only(image, max_width=700, max_height=240)
+    image = center_signature_canvas(image)
+    image = tight_crop_alpha(image, padding=4)
     return image
 
 
 # =========================================================
-# GEMINI SIGNATURE RECONSTRUCTION
+# GEMINI EXTRACTION
 # =========================================================
 
 def ask_gemini_extract_signature_only(
@@ -532,14 +600,10 @@ The final result should look like a cropped signature PNG, not a photo of paper.
 
 
 # =========================================================
-# LOCAL EMERGENCY FALLBACK
+# LOCAL FALLBACK
 # =========================================================
 
 def local_signature_cutout(image: Image.Image, threshold: int = 165) -> Image.Image:
-    """
-    Emergency fallback only.
-    It will not be as polished as Gemini reconstruction.
-    """
     image = image.convert("RGBA")
 
     if HAS_NUMPY:
@@ -559,8 +623,7 @@ def local_signature_cutout(image: Image.Image, threshold: int = 165) -> Image.Im
         arr[ink, 1] = 0
         arr[ink, 2] = 0
 
-        result = Image.fromarray(arr, mode="RGBA")
-        return finalize_signature_only(result)
+        return finalize_signature_only(Image.fromarray(arr, mode="RGBA"))
 
     new_data = []
     for r, g, b, a in image.getdata():
@@ -580,14 +643,6 @@ def process_signature_only(
     darkness_threshold: int,
     crop_padding: int,
 ) -> Tuple[Image.Image, str, str]:
-    """
-    Main pipeline:
-    1. Crop the signature region
-    2. Ask Gemini to reconstruct signature only
-    3. Convert white to transparent
-    4. Tight crop
-    5. Fallback locally if Gemini fails
-    """
     image = fix_image_orientation(image)
     image = smart_resize_for_processing(image, max_pixels=2400)
 
@@ -612,7 +667,6 @@ def process_signature_only(
             )
 
             final = finalize_signature_only(transparent)
-
             return final, "Gemini", "Signature-only extraction completed."
 
         except Exception as e:
@@ -631,16 +685,16 @@ st.markdown(f"""
 <div class="hero">
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
-        Upload a photo and get only the cropped-out signature as a transparent PNG.
-        No page preview, no paper background, no extra panels.
+        Upload a signature photo and get only the cropped-out signature as a transparent PNG.
+        For novice users, the app also creates a Word-ready signature document.
     </p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="tip-box">
-<strong>Goal:</strong> output only the signature as a transparent PNG thumbnail.<br>
-For best results, use dark ink and take the photo close to the signature.
+<strong>Goal:</strong> output only the signature as a centered transparent thumbnail.<br>
+Use dark ink and take the photo close to the signature for best results.
 </div>
 """, unsafe_allow_html=True)
 
@@ -729,14 +783,28 @@ if st.session_state.final_clean_rgba is not None:
             ),
             unsafe_allow_html=True,
         )
+
+        if DOCX_AVAILABLE:
+            docx_bytes = create_word_ready_docx(st.session_state.final_clean_rgba)
+            st.markdown(
+                docx_download_link(
+                    docx_bytes,
+                    "word_ready_signature.docx",
+                    "⬇️ Download Word-ready signature",
+                ),
+                unsafe_allow_html=True,
+            )
+        else:
+            st.warning("Install python-docx to enable Word-ready download.")
+
     else:
-        st.warning("Unlock to download the clean transparent PNG.")
+        st.warning("Unlock to download the clean transparent PNG and Word-ready file.")
         st.caption("Preview is watermarked to discourage screenshot reuse.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("---")
 st.markdown(
-    '<div class="footer-note">Signature-only transparent PNG extractor</div>',
+    '<div class="footer-note">Signature-only transparent PNG extractor with Word-ready export</div>',
     unsafe_allow_html=True,
 )

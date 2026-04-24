@@ -1,17 +1,28 @@
 """
 Signature Studio Pro
-Final corrected version:
-- Produces a tight transparent thumbnail of the signature
-- Gemini-first cleanup with automatic local fallback
+Final updated version:
+- Gemini-first signature cleanup
+- Automatic local fallback
+- Improved local paper/background removal
+- Produces tight transparent signature thumbnail
+- Removes dirty paper texture better
+- Streamlit Cloud secrets only
 - Protected preview for unpaid users
-- Streamlit secrets only
 
 Required Streamlit secrets:
+
 GEMINI_API_KEY = "your_key_here"
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
 GEMINI_ENABLED = true
 MAX_GEMINI_CALLS_PER_SESSION = 3
+
+requirements.txt:
+
+streamlit
+pillow
+numpy
+google-genai>=1.0.0
 """
 
 from __future__ import annotations
@@ -51,7 +62,8 @@ def load_config() -> AppConfig:
             """
 GEMINI_API_KEY missing in Streamlit secrets.
 
-Add:
+Add this under Streamlit Cloud -> Manage App -> Secrets:
+
 GEMINI_API_KEY = "your_key_here"
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
@@ -73,7 +85,7 @@ CONFIG = load_config()
 
 
 # =========================================================
-# STREAMLIT
+# STREAMLIT SETUP
 # =========================================================
 
 st.set_page_config(
@@ -100,7 +112,7 @@ for key, value in DEFAULT_SESSION_KEYS.items():
 
 
 # =========================================================
-# STYLES
+# CSS
 # =========================================================
 
 st.markdown("""
@@ -433,7 +445,7 @@ A clean, crisp, high-resolution version of the same signature on plain white bac
 def white_to_transparent_soft(
     image: Image.Image,
     threshold: int = 248,
-    softness: int = 10,
+    softness: int = 8,
 ) -> Image.Image:
     image = image.convert("RGBA")
     soft_start = max(0, threshold - softness)
@@ -472,61 +484,48 @@ def white_to_transparent_soft(
 
 
 # =========================================================
-# LOCAL FALLBACK PATH
+# LOCAL BACKGROUND REMOVAL
 # =========================================================
-
-def estimate_background_level(image: Image.Image) -> int:
-    rgb = image.convert("RGB")
-
-    if HAS_NUMPY:
-        arr = np.array(rgb, dtype=np.uint8)
-        brightness = arr.mean(axis=2).reshape(-1)
-
-        if brightness.size == 0:
-            return 245
-
-        top_cut = np.percentile(brightness, 90)
-        bright_pixels = brightness[brightness >= top_cut]
-
-        if bright_pixels.size == 0:
-            return 245
-
-        return int(np.median(bright_pixels))
-
-    pixels = list(rgb.getdata())
-    if not pixels:
-        return 245
-
-    brightness = sorted(int((r + g + b) / 3) for (r, g, b) in pixels)
-    start_idx = int(len(brightness) * 0.9)
-    bright_pixels = brightness[start_idx:] if start_idx < len(brightness) else brightness
-
-    if not bright_pixels:
-        return 245
-
-    mid = len(bright_pixels) // 2
-    if len(bright_pixels) % 2 == 0:
-        return (bright_pixels[mid - 1] + bright_pixels[mid]) // 2
-    return bright_pixels[mid]
-
 
 def remove_paper_background_soft(
     image: Image.Image,
     threshold: Optional[int] = None,
-    softness: int = 20
+    softness: int = 18
 ) -> Tuple[Image.Image, int]:
-    image = image.convert("RGBA")
+    """
+    Improved local paper removal:
+    - normalizes uneven lighting
+    - suppresses paper texture
+    - preserves black ink edges
+    """
+    image = image.convert("RGB")
+
+    # Normalize contrast first
+    image = ImageOps.autocontrast(image)
+
+    # Estimate and suppress background texture
+    background = image.filter(ImageFilter.GaussianBlur(9))
+
+    if HAS_NUMPY:
+        img = np.array(image, dtype=np.int16)
+        bg = np.array(background, dtype=np.int16)
+
+        # High-pass style normalization
+        diff = img - bg + 245
+        diff = np.clip(diff, 0, 255).astype(np.uint8)
+
+        normalized = Image.fromarray(diff).convert("RGBA")
+    else:
+        normalized = image.convert("RGBA")
 
     if threshold is None:
-        bg_level = estimate_background_level(image)
-        threshold = max(210, min(250, bg_level - 6))
+        threshold = 248
 
     soft_start = max(0, threshold - softness)
 
     if HAS_NUMPY:
-        arr = np.array(image, dtype=np.uint8)
-        rgb = arr[:, :, :3].astype(np.float32)
-        brightness = rgb.mean(axis=2)
+        arr = np.array(normalized, dtype=np.uint8)
+        brightness = arr[:, :, :3].mean(axis=2)
 
         alpha = np.where(
             brightness >= threshold,
@@ -534,31 +533,26 @@ def remove_paper_background_soft(
             np.where(
                 brightness <= soft_start,
                 255,
-                ((threshold - brightness) / max(1, threshold - soft_start) * 255)
-            )
+                ((threshold - brightness) / max(1, threshold - soft_start) * 255),
+            ),
         )
 
         arr[:, :, 3] = alpha.astype(np.uint8)
-        return Image.fromarray(arr, mode="RGBA"), int(threshold)
 
-    new_data = []
-    for r, g, b, a in image.getdata():
-        bright = (r + g + b) / 3
-        if bright >= threshold:
-            new_alpha = 0
-        elif bright <= soft_start:
-            new_alpha = 255
-        else:
-            new_alpha = int((threshold - bright) / max(1, threshold - soft_start) * 255)
-        new_data.append((r, g, b, new_alpha))
+        # Force ink color darker
+        ink = arr[:, :, 3] > 0
+        arr[ink, 0] = np.minimum(arr[ink, 0], 25)
+        arr[ink, 1] = np.minimum(arr[ink, 1], 25)
+        arr[ink, 2] = np.minimum(arr[ink, 2], 25)
 
-    image.putdata(new_data)
-    return image, int(threshold)
+        return Image.fromarray(arr, mode="RGBA"), threshold
+
+    return normalized, threshold
 
 
-def clean_alpha_noise(image: Image.Image, min_alpha: int = 20) -> Image.Image:
+def clean_alpha_noise(image: Image.Image, min_alpha: int = 28) -> Image.Image:
     """
-    Stronger cleanup so dirty outline disappears.
+    Strong cleanup to remove dirty paper outline.
     """
     image = image.convert("RGBA")
 
@@ -567,7 +561,7 @@ def clean_alpha_noise(image: Image.Image, min_alpha: int = 20) -> Image.Image:
         alpha = arr[:, :, 3]
 
         alpha[alpha < min_alpha] = 0
-        alpha[alpha >= 245] = 255
+        alpha[alpha >= 220] = 255
 
         arr[:, :, 3] = alpha
         return Image.fromarray(arr, mode="RGBA")
@@ -576,7 +570,7 @@ def clean_alpha_noise(image: Image.Image, min_alpha: int = 20) -> Image.Image:
     for r, g, b, a in image.getdata():
         if a < min_alpha:
             new_data.append((r, g, b, 0))
-        elif a >= 245:
+        elif a >= 220:
             new_data.append((r, g, b, 255))
         else:
             new_data.append((r, g, b, a))
@@ -584,10 +578,7 @@ def clean_alpha_noise(image: Image.Image, min_alpha: int = 20) -> Image.Image:
     return image
 
 
-def auto_crop_transparent(image: Image.Image, padding: int = 16) -> Image.Image:
-    """
-    Tight crop around signature only.
-    """
+def auto_crop_transparent(image: Image.Image, padding: int = 8) -> Image.Image:
     image = image.convert("RGBA")
     alpha = image.getchannel("A")
     bbox = alpha.getbbox()
@@ -604,10 +595,7 @@ def auto_crop_transparent(image: Image.Image, padding: int = 16) -> Image.Image:
     return image.crop((left, top, right, bottom))
 
 
-def remove_empty_margins_twice(image: Image.Image, padding: int = 12) -> Image.Image:
-    """
-    Final trim pass to ensure thumbnail-sized output.
-    """
+def remove_empty_margins_twice(image: Image.Image, padding: int = 6) -> Image.Image:
     first = auto_crop_transparent(image, padding=padding)
     second = auto_crop_transparent(first, padding=padding)
     return second
@@ -618,12 +606,18 @@ def resize_to_signature_thumbnail(
     target_width: int = 700,
     max_height: int = 250
 ) -> Image.Image:
-    """
-    Resize output to a signature-style thumbnail, not a page.
-    """
     img = image.copy()
     img.thumbnail((target_width, max_height), Image.Resampling.LANCZOS)
     return img
+
+
+def finalize_signature_thumbnail(image: Image.Image) -> Image.Image:
+    image = clean_alpha_noise(image, min_alpha=28)
+    image = remove_empty_margins_twice(image, padding=6)
+    image = resize_to_signature_thumbnail(image, target_width=700, max_height=250)
+    image = clean_alpha_noise(image, min_alpha=22)
+    image = remove_empty_margins_twice(image, padding=6)
+    return image
 
 
 # =========================================================
@@ -678,7 +672,7 @@ def score_result_quality(
     if fill_ratio < min_fill_ratio:
         return False, "Signature too faint."
     if fill_ratio > max_fill_ratio:
-        return False, "Too much non-background content remained."
+        return False, "Too much background remained."
     if bbox_w < 80 or bbox_h < 35:
         return False, "Signature bounds too small."
 
@@ -688,21 +682,6 @@ def score_result_quality(
 # =========================================================
 # PIPELINES
 # =========================================================
-
-def finalize_signature_thumbnail(image: Image.Image) -> Image.Image:
-    """
-    Final stage:
-    - remove weak halo
-    - crop tightly
-    - crop again
-    - resize to signature thumbnail
-    """
-    image = clean_alpha_noise(image, min_alpha=20)
-    image = remove_empty_margins_twice(image, padding=12)
-    image = resize_to_signature_thumbnail(image, target_width=700, max_height=250)
-    image = remove_empty_margins_twice(image, padding=10)
-    return image
-
 
 def run_gemini_pipeline(
     crop_for_processing: Image.Image,
@@ -725,13 +704,11 @@ def run_gemini_pipeline(
     return gemini_white, rgba
 
 
-def run_local_fallback_pipeline(
-    crop_for_processing: Image.Image,
-) -> Image.Image:
+def run_local_fallback_pipeline(crop_for_processing: Image.Image) -> Image.Image:
     rgba, _used_threshold = remove_paper_background_soft(
         crop_for_processing,
-        threshold=None,
-        softness=20,
+        threshold=248,
+        softness=18,
     )
     rgba = finalize_signature_thumbnail(rgba)
     return rgba
@@ -788,18 +765,19 @@ st.markdown(f"""
 <div class="hero">
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
-        This corrected version outputs a tight transparent thumbnail of the signature only,
-        not a page-sized image. Gemini is tried first, and local fallback is used automatically if needed.
+        Produces a tight transparent PNG thumbnail of the signature only.
+        Gemini is tried first, and improved local fallback removes paper texture when needed.
     </p>
 </div>
 """, unsafe_allow_html=True)
 
 c1, c2, c3 = st.columns(3)
+
 with c1:
     st.markdown("""
     <div class="card">
         <h3>Tight thumbnail output</h3>
-        <p>The final PNG is cropped to the actual signature with small margins only.</p>
+        <p>The final PNG is cropped tightly around the real signature, not the full page.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -807,7 +785,7 @@ with c2:
     st.markdown("""
     <div class="card">
         <h3>Cleaner transparency</h3>
-        <p>Weak dirty outlines are removed more aggressively before the final export.</p>
+        <p>Improved local processing suppresses paper texture and dirty outlines.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -815,7 +793,7 @@ with c3:
     st.markdown("""
     <div class="card">
         <h3>Gemini + fallback</h3>
-        <p>Gemini is used first, but a local fallback protects reliability and cost.</p>
+        <p>Gemini is used first, with automatic fallback for reliability and cost control.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -827,11 +805,12 @@ st.markdown("""
 • Take the photo closer so the signature fills more of the frame<br>
 • Use dark ink on plain white paper<br>
 • Avoid blur and heavy shadows<br>
-• The final output should now be thumbnail-sized, not page-sized
+• The final output should now be a signature thumbnail, not a page image
 </div>
 """, unsafe_allow_html=True)
 
 top_left, top_right = st.columns([1, 1])
+
 with top_left:
     st.session_state.paid = st.toggle(
         "Paid / unlocked mode",
@@ -861,15 +840,48 @@ if uploaded_file:
 
     with right:
         model_name = st.text_input("Gemini model", value=CONFIG.gemini_model)
-        darkness_threshold = st.slider("Ink detection threshold", 100, 190, 150, 2)
-        crop_padding = st.slider("Initial crop padding", 20, 140, 60, 5)
-        alpha_threshold = st.slider("White-to-alpha threshold", 240, 254, 248, 1)
-        alpha_softness = st.slider("Alpha edge softness", 4, 20, 10, 1)
 
-        run_btn = st.button("✨ Create transparent thumbnail", type="primary", use_container_width=True)
+        darkness_threshold = st.slider(
+            "Ink detection threshold",
+            100,
+            190,
+            150,
+            2
+        )
+
+        crop_padding = st.slider(
+            "Initial crop padding",
+            10,
+            120,
+            50,
+            5
+        )
+
+        alpha_threshold = st.slider(
+            "White-to-alpha threshold",
+            240,
+            254,
+            248,
+            1
+        )
+
+        alpha_softness = st.slider(
+            "Alpha edge softness",
+            4,
+            20,
+            8,
+            1
+        )
+
+        run_btn = st.button(
+            "✨ Create transparent thumbnail",
+            type="primary",
+            use_container_width=True
+        )
 
     if run_btn:
         start = time.time()
+
         try:
             with st.spinner("Processing signature thumbnail..."):
                 (
@@ -897,12 +909,17 @@ if uploaded_file:
 
             elapsed = time.time() - start
             st.success(f"Done in {elapsed:.2f} seconds.")
+
         except Exception as e:
             st.error(f"Processing failed: {e}")
 
 if st.session_state.final_clean_rgba is not None:
     st.markdown("---")
-    st.info(f"Method used: {st.session_state.method_used} — {st.session_state.quality_reason}")
+
+    st.info(
+        f"Method used: {st.session_state.method_used} — "
+        f"{st.session_state.quality_reason}"
+    )
 
     user_visible_preview = get_user_visible_preview(
         st.session_state.final_clean_rgba,
@@ -931,7 +948,7 @@ if st.session_state.final_clean_rgba is not None:
     with col_c:
         st.image(
             preview_transparent_image(user_visible_preview),
-            caption="3) Final thumbnail preview",
+            caption="3) Final transparent thumbnail preview",
             use_container_width=False
         )
 
@@ -966,6 +983,6 @@ if st.session_state.final_clean_rgba is not None:
 
 st.markdown("---")
 st.markdown(
-    '<div class="footer-note">Final corrected version: transparent signature thumbnail output</div>',
+    '<div class="footer-note">Transparent signature thumbnail output with Gemini-first cleanup and improved local fallback</div>',
     unsafe_allow_html=True
 )

@@ -1,10 +1,22 @@
 """
 Signature Studio Pro
-- Extracts ONLY the signature as a transparent PNG
-- Centers and tightly crops the signature
+Final production-focused script
+
+Features:
+- Extracts ONLY the signature
+- Removes paper/background/texture
+- Removes dirty corner artifacts and faint rectangle outlines
+- Produces tight transparent PNG thumbnail
 - Gemini-first extraction with local fallback
 - Protected preview for unpaid users
-- Adds Word-ready DOCX download for novice users
+- Word-ready DOCX export for novice users
+
+requirements.txt:
+streamlit
+pillow
+numpy
+google-genai>=1.0.0
+python-docx
 
 Streamlit secrets:
 GEMINI_API_KEY = "your_key_here"
@@ -19,6 +31,7 @@ from __future__ import annotations
 import base64
 import io
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -38,10 +51,6 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
-
-# =========================================================
-# CONFIG
-# =========================================================
 
 @dataclass
 class AppConfig:
@@ -78,11 +87,6 @@ MAX_GEMINI_CALLS_PER_SESSION = 3
 
 CONFIG = load_config()
 
-
-# =========================================================
-# STREAMLIT SETUP
-# =========================================================
-
 st.set_page_config(
     page_title=CONFIG.app_name,
     page_icon="🖊️",
@@ -102,10 +106,6 @@ for key, value in DEFAULT_SESSION_KEYS.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
-
-# =========================================================
-# CSS
-# =========================================================
 
 st.markdown("""
 <style>
@@ -160,7 +160,7 @@ st.markdown("""
 
 
 # =========================================================
-# GEMINI
+# Gemini
 # =========================================================
 
 def get_genai_client():
@@ -185,7 +185,7 @@ def increment_gemini_usage() -> None:
 
 
 # =========================================================
-# IMAGE HELPERS
+# Core image helpers
 # =========================================================
 
 def fix_image_orientation(image: Image.Image) -> Image.Image:
@@ -197,6 +197,7 @@ def fix_image_orientation(image: Image.Image) -> Image.Image:
 
 def smart_resize_for_processing(image: Image.Image, max_pixels: int = 2400) -> Image.Image:
     width, height = image.size
+
     if max(width, height) <= max_pixels:
         return image.copy()
 
@@ -251,10 +252,10 @@ def detect_signature_bbox(
         if not found:
             return image.copy()
 
-    x1 = max(0, x_min - padding)
-    y1 = max(0, y_min - padding)
-    x2 = min(image.width, x_max + padding)
-    y2 = min(image.height, y_max + padding)
+    x1 = max(0, int(x_min) - padding)
+    y1 = max(0, int(y_min) - padding)
+    x2 = min(image.width, int(x_max) + padding)
+    y2 = min(image.height, int(y_max) + padding)
 
     return image.crop((x1, y1, x2, y2))
 
@@ -298,7 +299,350 @@ def preview_transparent_image(sig_img: Image.Image) -> Image.Image:
 
 
 # =========================================================
-# DOWNLOAD HELPERS
+# Transparency and cleanup
+# =========================================================
+
+def white_to_transparent_hard(image: Image.Image, threshold: int = 250) -> Image.Image:
+    """
+    Aggressively removes white/near-white background and compression haze.
+    Forces visible pixels to pure black.
+    """
+    image = image.convert("RGBA")
+
+    if HAS_NUMPY:
+        arr = np.array(image, dtype=np.uint8)
+        brightness = arr[:, :, :3].mean(axis=2)
+
+        alpha = np.where(brightness > threshold, 0, 255).astype(np.uint8)
+        arr[:, :, 3] = alpha
+
+        ink = alpha > 0
+        arr[ink, 0] = 0
+        arr[ink, 1] = 0
+        arr[ink, 2] = 0
+
+        return Image.fromarray(arr, mode="RGBA")
+
+    new_pixels = []
+
+    for r, g, b, a in image.getdata():
+        brightness = (r + g + b) / 3
+
+        if brightness > threshold:
+            new_pixels.append((255, 255, 255, 0))
+        else:
+            new_pixels.append((0, 0, 0, 255))
+
+    image.putdata(new_pixels)
+    return image
+
+
+def remove_small_noise(image: Image.Image, alpha_cutoff: int = 255) -> Image.Image:
+    """
+    Removes faint alpha residues.
+    """
+    image = image.convert("RGBA")
+
+    if HAS_NUMPY:
+        arr = np.array(image, dtype=np.uint8)
+        alpha = arr[:, :, 3]
+        alpha[alpha < alpha_cutoff] = 0
+        arr[:, :, 3] = alpha
+
+        ink = alpha > 0
+        arr[ink, 0] = 0
+        arr[ink, 1] = 0
+        arr[ink, 2] = 0
+
+        return Image.fromarray(arr, mode="RGBA")
+
+    new_data = []
+
+    for r, g, b, a in image.getdata():
+        if a < alpha_cutoff:
+            new_data.append((r, g, b, 0))
+        else:
+            new_data.append((0, 0, 0, 255))
+
+    image.putdata(new_data)
+    return image
+
+
+def remove_small_alpha_components(
+    image: Image.Image,
+    min_area: int = 60,
+) -> Image.Image:
+    """
+    Removes small isolated artifacts such as dirty corner marks.
+    Keeps real signature strokes and nearby dot components.
+    """
+    image = image.convert("RGBA")
+
+    if not HAS_NUMPY:
+        return image
+
+    arr = np.array(image, dtype=np.uint8)
+    mask = arr[:, :, 3] > 0
+
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+
+    components = []
+
+    for y in range(height):
+        for x in range(width):
+            if not mask[y, x] or visited[y, x]:
+                continue
+
+            q = deque([(y, x)])
+            visited[y, x] = True
+            pixels = []
+
+            while q:
+                cy, cx = q.popleft()
+                pixels.append((cy, cx))
+
+                for ny in (cy - 1, cy, cy + 1):
+                    for nx in (cx - 1, cx, cx + 1):
+                        if ny == cy and nx == cx:
+                            continue
+                        if 0 <= ny < height and 0 <= nx < width:
+                            if mask[ny, nx] and not visited[ny, nx]:
+                                visited[ny, nx] = True
+                                q.append((ny, nx))
+
+            components.append(pixels)
+
+    if not components:
+        return image
+
+    # Keep reasonably sized components.
+    keep = np.zeros_like(mask, dtype=bool)
+
+    for comp in components:
+        if len(comp) >= min_area:
+            for y, x in comp:
+                keep[y, x] = True
+
+    arr[~keep, 3] = 0
+
+    return Image.fromarray(arr, mode="RGBA")
+
+
+def tight_crop_alpha(image: Image.Image, padding: int = 2) -> Image.Image:
+    image = image.convert("RGBA")
+    bbox = image.getchannel("A").getbbox()
+
+    if not bbox:
+        return image
+
+    left, top, right, bottom = bbox
+
+    left = max(0, left - padding)
+    top = max(0, top - padding)
+    right = min(image.width, right + padding)
+    bottom = min(image.height, bottom + padding)
+
+    return image.crop((left, top, right, bottom))
+
+
+def center_signature_canvas(image: Image.Image) -> Image.Image:
+    """
+    Removes off-center transparent canvas and rebuilds a minimal canvas.
+    """
+    image = image.convert("RGBA")
+    bbox = image.getchannel("A").getbbox()
+
+    if not bbox:
+        return image
+
+    cropped = image.crop(bbox)
+    canvas = Image.new("RGBA", cropped.size, (0, 0, 0, 0))
+    canvas.paste(cropped, (0, 0), cropped)
+    return canvas
+
+
+def resize_signature_only(
+    image: Image.Image,
+    max_width: int = 700,
+    max_height: int = 240,
+) -> Image.Image:
+    img = image.copy()
+    img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+    return img
+
+
+def finalize_signature_only(image: Image.Image) -> Image.Image:
+    """
+    Final signature-only cleanup:
+    - remove haze
+    - remove isolated artifacts
+    - crop tightly
+    - center
+    - resize last
+    - crop again
+    """
+    image = image.convert("RGBA")
+
+    image = remove_small_noise(image, alpha_cutoff=255)
+    image = remove_small_alpha_components(image, min_area=60)
+
+    image = tight_crop_alpha(image, padding=2)
+    image = tight_crop_alpha(image, padding=1)
+
+    image = center_signature_canvas(image)
+
+    image = resize_signature_only(image, max_width=700, max_height=240)
+
+    image = remove_small_noise(image, alpha_cutoff=255)
+    image = remove_small_alpha_components(image, min_area=40)
+
+    image = center_signature_canvas(image)
+    image = tight_crop_alpha(image, padding=1)
+
+    return image
+
+
+# =========================================================
+# Gemini extraction
+# =========================================================
+
+def ask_gemini_extract_signature_only(
+    cropped_image: Image.Image,
+    model_name: str,
+) -> Image.Image:
+    client = get_genai_client()
+
+    prompt = """
+Extract ONLY the handwritten signature ink from this image.
+
+Create a clean signature asset:
+- Keep only the signature strokes.
+- Remove all paper, texture, shadows, background, lighting, and noise.
+- Recreate the signature as clean solid black ink.
+- Preserve the original signature shape, stroke path, proportions, and angle.
+- Do not include any page, rectangle, border, shadow, glow, or background.
+- Do not add new flourishes.
+- Do not transform the signature into a different handwriting style.
+- Center the signature tightly with a very small white margin.
+- Output the result on a PURE WHITE background only.
+
+The final result should look like a cropped signature PNG, not a photo of paper.
+""".strip()
+
+    response = client.models.generate_content(
+        model=model_name,
+        contents=[prompt, cropped_image],
+    )
+
+    increment_gemini_usage()
+
+    parts = getattr(response, "parts", None)
+
+    if parts:
+        for part in parts:
+            if getattr(part, "inline_data", None) is not None:
+                return part.as_image().convert("RGBA")
+
+    candidates = getattr(response, "candidates", None)
+
+    if candidates:
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            if content and getattr(content, "parts", None):
+                for part in content.parts:
+                    if getattr(part, "inline_data", None) is not None:
+                        return part.as_image().convert("RGBA")
+
+    raise RuntimeError("Gemini did not return an image.")
+
+
+# =========================================================
+# Local fallback
+# =========================================================
+
+def local_signature_cutout(image: Image.Image, threshold: int = 165) -> Image.Image:
+    """
+    Emergency fallback. Not as polished as Gemini, but reliable.
+    """
+    image = image.convert("RGBA")
+
+    if HAS_NUMPY:
+        arr = np.array(image, dtype=np.uint8)
+        rgb = arr[:, :, :3]
+
+        gray = (
+            0.299 * rgb[:, :, 0]
+            + 0.587 * rgb[:, :, 1]
+            + 0.114 * rgb[:, :, 2]
+        )
+
+        ink = gray < threshold
+
+        arr[:, :, 3] = np.where(ink, 255, 0).astype(np.uint8)
+        arr[ink, 0] = 0
+        arr[ink, 1] = 0
+        arr[ink, 2] = 0
+
+        return finalize_signature_only(Image.fromarray(arr, mode="RGBA"))
+
+    new_data = []
+
+    for r, g, b, a in image.getdata():
+        gray = 0.299 * r + 0.587 * g + 0.114 * b
+
+        if gray < threshold:
+            new_data.append((0, 0, 0, 255))
+        else:
+            new_data.append((255, 255, 255, 0))
+
+    image.putdata(new_data)
+    return finalize_signature_only(image)
+
+
+def process_signature_only(
+    image: Image.Image,
+    model_name: str,
+    darkness_threshold: int,
+    crop_padding: int,
+) -> Tuple[Image.Image, str, str]:
+    image = fix_image_orientation(image)
+    image = smart_resize_for_processing(image, max_pixels=2400)
+
+    crop = detect_signature_bbox(
+        image=image,
+        darkness_threshold=darkness_threshold,
+        padding=crop_padding,
+    )
+
+    crop_for_gemini = enhance_crop_before_gemini(crop, min_width=1200)
+
+    if CONFIG.gemini_enabled and st.session_state.gemini_calls_used < CONFIG.max_calls_per_session:
+        try:
+            gemini_white = ask_gemini_extract_signature_only(
+                cropped_image=crop_for_gemini,
+                model_name=model_name,
+            )
+
+            transparent = white_to_transparent_hard(
+                gemini_white,
+                threshold=250,
+            )
+
+            final = finalize_signature_only(transparent)
+
+            return final, "Gemini", "Signature-only extraction completed."
+
+        except Exception as e:
+            fallback = local_signature_cutout(crop_for_gemini, threshold=165)
+            return fallback, "Local fallback", f"Gemini failed: {e}"
+
+    fallback = local_signature_cutout(crop_for_gemini, threshold=165)
+    return fallback, "Local fallback", "Gemini disabled or session limit reached."
+
+
+# =========================================================
+# Downloads
 # =========================================================
 
 def png_bytes_with_metadata(img: Image.Image) -> bytes:
@@ -307,7 +651,7 @@ def png_bytes_with_metadata(img: Image.Image) -> bytes:
     meta.add_text("Background", "Transparent PNG")
 
     buf = io.BytesIO()
-    img.save(buf, format="PNG", pnginfo=meta)
+    img.save(buf, format="PNG", optimize=True, pnginfo=meta)
     return buf.getvalue()
 
 
@@ -334,10 +678,6 @@ def pil_png_download_link(img: Image.Image, filename: str, label: str) -> str:
 
 
 def create_word_ready_docx(signature_img: Image.Image) -> bytes:
-    """
-    Creates a simple DOCX containing the transparent signature image.
-    Users can open this docx and copy/paste the image into other Word documents.
-    """
     if not DOCX_AVAILABLE:
         raise RuntimeError("python-docx is not installed.")
 
@@ -349,10 +689,7 @@ def create_word_ready_docx(signature_img: Image.Image) -> bytes:
         "In Microsoft Word, click the image and choose Layout Options → In Front of Text."
     )
 
-    img_bytes = png_bytes_with_metadata(signature_img)
-    img_stream = io.BytesIO(img_bytes)
-
-    # Natural signature display size
+    img_stream = io.BytesIO(png_bytes_with_metadata(signature_img))
     doc.add_picture(img_stream, width=Inches(2.2))
 
     doc.add_paragraph("")
@@ -387,7 +724,7 @@ def docx_download_link(docx_bytes: bytes, filename: str, label: str) -> str:
 
 
 # =========================================================
-# PREVIEW PROTECTION
+# Preview protection
 # =========================================================
 
 def add_preview_protection(
@@ -434,250 +771,6 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 
 
 # =========================================================
-# TRANSPARENCY + CENTERED CROP
-# =========================================================
-
-def white_to_transparent_hard(
-    image: Image.Image,
-    threshold: int = 252,
-) -> Image.Image:
-    image = image.convert("RGBA")
-
-    if HAS_NUMPY:
-        arr = np.array(image, dtype=np.uint8)
-        rgb = arr[:, :, :3]
-        brightness = rgb.mean(axis=2)
-
-        alpha = np.where(brightness >= threshold, 0, 255).astype(np.uint8)
-        arr[:, :, 3] = alpha
-
-        ink = alpha > 0
-        arr[ink, 0] = 0
-        arr[ink, 1] = 0
-        arr[ink, 2] = 0
-
-        return Image.fromarray(arr, mode="RGBA")
-
-    new_data = []
-    for r, g, b, a in image.getdata():
-        brightness = (r + g + b) / 3
-        if brightness >= threshold:
-            new_data.append((255, 255, 255, 0))
-        else:
-            new_data.append((0, 0, 0, 255))
-
-    image.putdata(new_data)
-    return image
-
-
-def remove_small_noise(image: Image.Image, alpha_cutoff: int = 255) -> Image.Image:
-    image = image.convert("RGBA")
-
-    if HAS_NUMPY:
-        arr = np.array(image, dtype=np.uint8)
-        alpha = arr[:, :, 3]
-        alpha[alpha < alpha_cutoff] = 0
-        arr[:, :, 3] = alpha
-        return Image.fromarray(arr, mode="RGBA")
-
-    new_data = []
-    for r, g, b, a in image.getdata():
-        if a < alpha_cutoff:
-            new_data.append((r, g, b, 0))
-        else:
-            new_data.append((0, 0, 0, 255))
-    image.putdata(new_data)
-    return image
-
-
-def tight_crop_alpha(image: Image.Image, padding: int = 6) -> Image.Image:
-    image = image.convert("RGBA")
-    bbox = image.getchannel("A").getbbox()
-
-    if not bbox:
-        return image
-
-    left, top, right, bottom = bbox
-    left = max(0, left - padding)
-    top = max(0, top - padding)
-    right = min(image.width, right + padding)
-    bottom = min(image.height, bottom + padding)
-
-    return image.crop((left, top, right, bottom))
-
-
-def center_signature_canvas(image: Image.Image) -> Image.Image:
-    """
-    Removes off-center transparent canvas.
-    """
-    image = image.convert("RGBA")
-    bbox = image.getchannel("A").getbbox()
-
-    if not bbox:
-        return image
-
-    cropped = image.crop(bbox)
-    canvas = Image.new("RGBA", cropped.size, (0, 0, 0, 0))
-    canvas.paste(cropped, (0, 0), cropped)
-    return canvas
-
-
-def resize_signature_only(
-    image: Image.Image,
-    max_width: int = 700,
-    max_height: int = 240,
-) -> Image.Image:
-    img = image.copy()
-    img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
-    return img
-
-
-def finalize_signature_only(image: Image.Image) -> Image.Image:
-    """
-    Final order matters:
-    clean → tight crop → center → resize LAST → crop again.
-    """
-    image = remove_small_noise(image, alpha_cutoff=255)
-    image = tight_crop_alpha(image, padding=6)
-    image = tight_crop_alpha(image, padding=4)
-    image = center_signature_canvas(image)
-    image = resize_signature_only(image, max_width=700, max_height=240)
-    image = center_signature_canvas(image)
-    image = tight_crop_alpha(image, padding=4)
-    return image
-
-
-# =========================================================
-# GEMINI EXTRACTION
-# =========================================================
-
-def ask_gemini_extract_signature_only(
-    cropped_image: Image.Image,
-    model_name: str,
-) -> Image.Image:
-    client = get_genai_client()
-
-    prompt = """
-Extract ONLY the handwritten signature ink from this image.
-
-Create a clean signature asset:
-- Keep only the signature strokes.
-- Remove all paper, texture, shadows, background, lighting, and noise.
-- Recreate the signature as clean solid black ink.
-- Preserve the original signature shape, stroke path, proportions, and angle.
-- Do not include any page, rectangle, border, shadow, glow, or background.
-- Do not add new flourishes.
-- Do not transform the signature into a different handwriting style.
-- Center the signature tightly with a very small white margin.
-- Output the result on a PURE WHITE background only.
-
-The final result should look like a cropped signature PNG, not a photo of paper.
-""".strip()
-
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[prompt, cropped_image],
-    )
-
-    increment_gemini_usage()
-
-    parts = getattr(response, "parts", None)
-    if parts:
-        for part in parts:
-            if getattr(part, "inline_data", None) is not None:
-                return part.as_image().convert("RGBA")
-
-    candidates = getattr(response, "candidates", None)
-    if candidates:
-        for candidate in candidates:
-            content = getattr(candidate, "content", None)
-            if content and getattr(content, "parts", None):
-                for part in content.parts:
-                    if getattr(part, "inline_data", None) is not None:
-                        return part.as_image().convert("RGBA")
-
-    raise RuntimeError("Gemini did not return an image.")
-
-
-# =========================================================
-# LOCAL FALLBACK
-# =========================================================
-
-def local_signature_cutout(image: Image.Image, threshold: int = 165) -> Image.Image:
-    image = image.convert("RGBA")
-
-    if HAS_NUMPY:
-        arr = np.array(image, dtype=np.uint8)
-        rgb = arr[:, :, :3]
-
-        gray = (
-            0.299 * rgb[:, :, 0]
-            + 0.587 * rgb[:, :, 1]
-            + 0.114 * rgb[:, :, 2]
-        )
-
-        ink = gray < threshold
-
-        arr[:, :, 3] = np.where(ink, 255, 0).astype(np.uint8)
-        arr[ink, 0] = 0
-        arr[ink, 1] = 0
-        arr[ink, 2] = 0
-
-        return finalize_signature_only(Image.fromarray(arr, mode="RGBA"))
-
-    new_data = []
-    for r, g, b, a in image.getdata():
-        gray = 0.299 * r + 0.587 * g + 0.114 * b
-        if gray < threshold:
-            new_data.append((0, 0, 0, 255))
-        else:
-            new_data.append((255, 255, 255, 0))
-
-    image.putdata(new_data)
-    return finalize_signature_only(image)
-
-
-def process_signature_only(
-    image: Image.Image,
-    model_name: str,
-    darkness_threshold: int,
-    crop_padding: int,
-) -> Tuple[Image.Image, str, str]:
-    image = fix_image_orientation(image)
-    image = smart_resize_for_processing(image, max_pixels=2400)
-
-    crop = detect_signature_bbox(
-        image=image,
-        darkness_threshold=darkness_threshold,
-        padding=crop_padding,
-    )
-
-    crop_for_gemini = enhance_crop_before_gemini(crop, min_width=1200)
-
-    if CONFIG.gemini_enabled and st.session_state.gemini_calls_used < CONFIG.max_calls_per_session:
-        try:
-            gemini_white = ask_gemini_extract_signature_only(
-                cropped_image=crop_for_gemini,
-                model_name=model_name,
-            )
-
-            transparent = white_to_transparent_hard(
-                gemini_white,
-                threshold=252,
-            )
-
-            final = finalize_signature_only(transparent)
-            return final, "Gemini", "Signature-only extraction completed."
-
-        except Exception as e:
-            fallback = local_signature_cutout(crop_for_gemini, threshold=165)
-            return fallback, "Local fallback", f"Gemini failed: {e}"
-
-    fallback = local_signature_cutout(crop_for_gemini, threshold=165)
-    return fallback, "Local fallback", "Gemini disabled or session limit reached."
-
-
-# =========================================================
 # UI
 # =========================================================
 
@@ -685,8 +778,8 @@ st.markdown(f"""
 <div class="hero">
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
-        Upload a signature photo and get only the cropped-out signature as a transparent PNG.
-        For novice users, the app also creates a Word-ready signature document.
+        Upload a signature photo and get only the cropped-out signature as a clean transparent PNG.
+        The final file is tightly cropped, centered, and cleaned to avoid dirty corners or rectangle outlines.
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -805,6 +898,6 @@ if st.session_state.final_clean_rgba is not None:
 
 st.markdown("---")
 st.markdown(
-    '<div class="footer-note">Signature-only transparent PNG extractor with Word-ready export</div>',
+    '<div class="footer-note">Signature-only transparent PNG extractor with artifact cleanup and Word-ready export</div>',
     unsafe_allow_html=True,
 )

@@ -1,6 +1,5 @@
 """
 Signature Studio Pro
-Complete version with payment CTA and stronger unpaid watermark.
 
 requirements.txt:
 streamlit
@@ -8,14 +7,19 @@ pillow
 numpy
 google-genai>=1.0.0
 python-docx
+stripe
 
-Streamlit Cloud secrets:
-GEMINI_API_KEY = "your_key_here"
+Streamlit secrets:
+GEMINI_API_KEY = ""
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
-GEMINI_ENABLED = true
-MAX_GEMINI_CALLS_PER_SESSION = 3
-PAYMENT_URL = "https://your-payment-link-here"
+STRIPE_SECRET_KEY = ""
+STRIPE_PRICE_ID_SIGNATURE = ""
+PAYPAL_EMAIL = "mampadif@gmail.com"
+APP_URL = "https://signature-studio.streamlit.app/"
+UNLOCK_CODE = ""
+PRICE_DISPLAY = "$3.99"
+MAX_AI_CALLS_PER_SESSION = 3
 """
 
 from __future__ import annotations
@@ -36,6 +40,12 @@ except ImportError:
     HAS_NUMPY = False
 
 try:
+    import stripe
+    STRIPE_AVAILABLE = True
+except ImportError:
+    STRIPE_AVAILABLE = False
+
+try:
     from docx import Document
     from docx.shared import Inches
     DOCX_AVAILABLE = True
@@ -49,25 +59,30 @@ except ImportError:
 
 @dataclass
 class AppConfig:
-    gemini_api_key: str
-    gemini_model: str
+    api_key: str
+    ai_model: str
     app_name: str
-    gemini_enabled: bool
-    max_calls_per_session: int
-    payment_url: str
+    max_ai_calls_per_session: int
+    stripe_secret_key: str
+    stripe_price_id_signature: str
+    paypal_email: str
+    app_url: str
+    unlock_code: str
+    price_display: str
 
 
 def load_config() -> AppConfig:
-    if "GEMINI_API_KEY" not in st.secrets:
-        raise RuntimeError("Missing GEMINI_API_KEY in Streamlit Secrets.")
-
     return AppConfig(
-        gemini_api_key=st.secrets["GEMINI_API_KEY"],
-        gemini_model=st.secrets.get("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
+        api_key=st.secrets.get("GEMINI_API_KEY", ""),
+        ai_model=st.secrets.get("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
         app_name=st.secrets.get("APP_NAME", "Signature Studio Pro"),
-        gemini_enabled=bool(st.secrets.get("GEMINI_ENABLED", True)),
-        max_calls_per_session=int(st.secrets.get("MAX_GEMINI_CALLS_PER_SESSION", 3)),
-        payment_url=st.secrets.get("PAYMENT_URL", "#"),
+        max_ai_calls_per_session=int(st.secrets.get("MAX_AI_CALLS_PER_SESSION", 3)),
+        stripe_secret_key=st.secrets.get("STRIPE_SECRET_KEY", ""),
+        stripe_price_id_signature=st.secrets.get("STRIPE_PRICE_ID_SIGNATURE", ""),
+        paypal_email=st.secrets.get("PAYPAL_EMAIL", ""),
+        app_url=st.secrets.get("APP_URL", ""),
+        unlock_code=st.secrets.get("UNLOCK_CODE", ""),
+        price_display=st.secrets.get("PRICE_DISPLAY", "$3.99"),
     )
 
 
@@ -87,7 +102,7 @@ st.set_page_config(
 
 DEFAULT_SESSION_KEYS = {
     "paid": False,
-    "gemini_calls_used": 0,
+    "ai_calls_used": 0,
     "final_clean_rgba": None,
     "method_used": None,
     "quality_reason": None,
@@ -97,6 +112,63 @@ DEFAULT_SESSION_KEYS = {
 for key, value in DEFAULT_SESSION_KEYS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+
+# =========================================================
+# PAYMENT
+# =========================================================
+
+def verify_stripe_payment_from_query() -> bool:
+    if not STRIPE_AVAILABLE:
+        return False
+
+    paid_flag = st.query_params.get("paid")
+    session_id = st.query_params.get("session_id")
+
+    if paid_flag != "1" or not session_id:
+        return False
+
+    if not CONFIG.stripe_secret_key:
+        return False
+
+    try:
+        stripe.api_key = CONFIG.stripe_secret_key
+        session = stripe.checkout.Session.retrieve(session_id)
+        return session.payment_status == "paid"
+    except Exception:
+        return False
+
+
+def create_stripe_checkout_url() -> str | None:
+    if not STRIPE_AVAILABLE:
+        return None
+
+    if not CONFIG.stripe_secret_key or not CONFIG.stripe_price_id_signature or not CONFIG.app_url:
+        return None
+
+    try:
+        stripe.api_key = CONFIG.stripe_secret_key
+
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            line_items=[
+                {
+                    "price": CONFIG.stripe_price_id_signature,
+                    "quantity": 1,
+                }
+            ],
+            success_url=f"{CONFIG.app_url}?paid=1&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{CONFIG.app_url}?cancelled=1",
+        )
+
+        return session.url
+
+    except Exception:
+        return None
+
+
+if verify_stripe_payment_from_query():
+    st.session_state.paid = True
 
 
 # =========================================================
@@ -147,8 +219,8 @@ st.markdown("""
 }
 .payment-card {
     margin-top: 1.25rem;
-    padding: 1.25rem;
-    border-radius: 22px;
+    padding: 1.35rem;
+    border-radius: 24px;
     background: linear-gradient(135deg, #fff7ed 0%, #fffbeb 100%);
     border: 1px solid #fed7aa;
     box-shadow: 0 10px 26px rgba(154,52,18,0.08);
@@ -167,7 +239,7 @@ st.markdown("""
     display:inline-block;
     background: linear-gradient(90deg,#111827 0%, #374151 100%);
     color:white !important;
-    padding:0.8rem 1.1rem;
+    padding:0.85rem 1.15rem;
     border-radius:999px;
     text-decoration:none !important;
     font-weight:800;
@@ -189,15 +261,15 @@ st.markdown("""
 
 
 # =========================================================
-# GEMINI
+# AI CLIENT
 # =========================================================
 
-def get_genai_client():
-    if not CONFIG.gemini_enabled:
-        raise RuntimeError("Gemini disabled via configuration.")
+def get_ai_client():
+    if not CONFIG.api_key:
+        raise RuntimeError("AI cleanup is not configured.")
 
-    if st.session_state.gemini_calls_used >= CONFIG.max_calls_per_session:
-        raise RuntimeError("Gemini session usage limit reached.")
+    if st.session_state.ai_calls_used >= CONFIG.max_ai_calls_per_session:
+        raise RuntimeError("AI cleanup session limit reached.")
 
     try:
         from google import genai
@@ -206,11 +278,11 @@ def get_genai_client():
             "google-genai package missing. Add 'google-genai>=1.0.0' to requirements.txt."
         ) from e
 
-    return genai.Client(api_key=CONFIG.gemini_api_key)
+    return genai.Client(api_key=CONFIG.api_key)
 
 
-def increment_gemini_usage() -> None:
-    st.session_state.gemini_calls_used += 1
+def increment_ai_usage() -> None:
+    st.session_state.ai_calls_used += 1
 
 
 # =========================================================
@@ -218,9 +290,6 @@ def increment_gemini_usage() -> None:
 # =========================================================
 
 def ensure_pil_image(obj) -> Image.Image:
-    """
-    Converts Gemini/image outputs safely to PIL Image.
-    """
     if isinstance(obj, Image.Image):
         return obj.convert("RGBA")
 
@@ -407,7 +476,7 @@ def detect_signature_bbox(
     return image.crop((x1, y1, x2, y2))
 
 
-def enhance_crop_before_gemini(image: Image.Image, min_width: int = 1200) -> Image.Image:
+def enhance_crop_before_ai(image: Image.Image, min_width: int = 1200) -> Image.Image:
     img = image.convert("RGB")
 
     if img.width < min_width:
@@ -659,14 +728,14 @@ def score_output_quality(image: Image.Image) -> Tuple[bool, str]:
 
 
 # =========================================================
-# GEMINI EXTRACTION
+# AI EXTRACTION
 # =========================================================
 
-def ask_gemini_extract_signature_only(
+def ask_ai_extract_signature_only(
     cropped_image: Image.Image,
     model_name: str,
 ) -> Image.Image:
-    client = get_genai_client()
+    client = get_ai_client()
 
     prompt = """
 Extract ONLY the handwritten signature ink from this image.
@@ -690,7 +759,7 @@ The result should look like a cropped signature PNG, not a photo of paper.
         contents=[prompt, cropped_image],
     )
 
-    increment_gemini_usage()
+    increment_ai_usage()
 
     parts = getattr(response, "parts", None)
 
@@ -709,7 +778,7 @@ The result should look like a cropped signature PNG, not a photo of paper.
                     if getattr(part, "inline_data", None) is not None:
                         return ensure_pil_image(part.as_image())
 
-    raise RuntimeError("Gemini did not return an image.")
+    raise RuntimeError("AI cleanup did not return an image.")
 
 
 # =========================================================
@@ -765,17 +834,17 @@ def process_signature_only(
         padding=crop_padding,
     )
 
-    crop_for_gemini = enhance_crop_before_gemini(crop, min_width=1200)
+    crop_for_processing = enhance_crop_before_ai(crop, min_width=1200)
 
-    if CONFIG.gemini_enabled and st.session_state.gemini_calls_used < CONFIG.max_calls_per_session:
+    if CONFIG.api_key and st.session_state.ai_calls_used < CONFIG.max_ai_calls_per_session:
         try:
-            gemini_white = ask_gemini_extract_signature_only(
-                cropped_image=crop_for_gemini,
+            cleaned_white = ask_ai_extract_signature_only(
+                cropped_image=crop_for_processing,
                 model_name=model_name,
             )
 
             transparent = white_to_transparent_soft(
-                gemini_white,
+                cleaned_white,
                 threshold=alpha_threshold,
                 softness=alpha_softness,
             )
@@ -784,24 +853,24 @@ def process_signature_only(
             ok, reason = score_output_quality(final)
 
             if ok:
-                return final, "Gemini", "Signature extracted successfully."
+                return final, "Enhanced cleanup", "Signature extracted successfully."
 
             return None, "Rejected", reason
 
         except Exception as e:
-            fallback = local_signature_cutout(crop_for_gemini, threshold=150)
+            fallback = local_signature_cutout(crop_for_processing, threshold=150)
             ok, reason = score_output_quality(fallback)
 
             if ok:
-                return fallback, "Local fallback", f"Gemini failed: {e}"
+                return fallback, "Standard cleanup", f"Enhanced cleanup unavailable: {e}"
 
             return None, "Rejected", reason
 
-    fallback = local_signature_cutout(crop_for_gemini, threshold=150)
+    fallback = local_signature_cutout(crop_for_processing, threshold=150)
     ok, reason = score_output_quality(fallback)
 
     if ok:
-        return fallback, "Local fallback", "Gemini disabled or session limit reached."
+        return fallback, "Standard cleanup", "Enhanced cleanup unavailable."
 
     return None, "Rejected", reason
 
@@ -936,8 +1005,7 @@ def add_preview_protection(
         for x in range(-rotated.width, img.width + rotated.width, step_x):
             overlay.alpha_composite(rotated, (x, y))
 
-    protected = Image.alpha_composite(img, overlay)
-    return protected
+    return Image.alpha_composite(img, overlay)
 
 
 def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
@@ -945,24 +1013,58 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 
 
 def payment_cta() -> None:
+    checkout_url = create_stripe_checkout_url()
+
+    if checkout_url:
+        button_html = f"""
+        <a class="payment-btn" href="{checkout_url}" target="_self">
+            🔓 Pay {CONFIG.price_display} & Unlock
+        </a>
+        <div class="payment-secondary">
+            Secure checkout. Includes transparent PNG + Word-ready signature document.
+        </div>
+        """
+    else:
+        paypal_part = ""
+        if CONFIG.paypal_email:
+            paypal_part = f"""
+            <p>
+                Stripe checkout is not available yet. You can pay via PayPal to:
+                <strong>{CONFIG.paypal_email}</strong>
+            </p>
+            """
+
+        button_html = f"""
+        {paypal_part}
+        <div class="payment-secondary">
+            Payment setup is incomplete. Add STRIPE_SECRET_KEY and STRIPE_PRICE_ID_SIGNATURE in Streamlit secrets.
+        </div>
+        """
+
     st.markdown(
         f"""
         <div class="payment-card">
             <h3>🔓 Unlock clean signature files</h3>
             <p>
-                Your preview is watermarked. Unlock to download the clean transparent PNG
-                and the Word-ready signature file.
+                Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
+                to download the clean transparent PNG and Word-ready signature file.
             </p>
-            <a class="payment-btn" href="{CONFIG.payment_url}" target="_blank">
-                🔓 Unlock & Download
-            </a>
-            <div class="payment-secondary">
-                Includes transparent PNG + Word-ready signature document.
-            </div>
+            {button_html}
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    if CONFIG.unlock_code:
+        with st.expander("Already paid? Enter unlock code"):
+            code = st.text_input("Unlock code", type="password")
+            if st.button("Unlock downloads"):
+                if code.strip() == CONFIG.unlock_code.strip():
+                    st.session_state.paid = True
+                    st.success("Downloads unlocked.")
+                    st.rerun()
+                else:
+                    st.error("Invalid unlock code.")
 
 
 # =========================================================
@@ -973,8 +1075,7 @@ st.markdown(f"""
 <div class="hero">
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
-        Upload a signature photo and download a clean transparent PNG signature.
-        The app checks image quality before processing to avoid bad outputs.
+        Upload a signature photo, preview the result for free, then unlock clean downloads for {CONFIG.price_display}.
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -997,15 +1098,15 @@ top_left, top_right = st.columns([1, 1])
 
 with top_left:
     st.session_state.paid = st.toggle(
-        "Paid / unlocked mode",
+        "Demo: unlocked mode",
         value=st.session_state.paid,
-        help="Demo switch. Replace with real payment status later.",
+        help="For testing only. Replace with real access control before launch.",
     )
 
 with top_right:
     st.caption(
-        f"Gemini calls used: {st.session_state.gemini_calls_used} / "
-        f"{CONFIG.max_calls_per_session}"
+        f"Processing attempts used: {st.session_state.ai_calls_used} / "
+        f"{CONFIG.max_ai_calls_per_session}"
     )
 
 uploaded_file = st.file_uploader(
@@ -1026,17 +1127,17 @@ if uploaded_file:
         )
 
     with st.expander("Processing settings", expanded=False):
-        model_name = st.text_input("Gemini model", value=CONFIG.gemini_model)
+        model_name = st.text_input("Processing model", value=CONFIG.ai_model)
         darkness_threshold = st.slider("Ink detection threshold", 100, 220, 170, 2)
         crop_padding = st.slider("Crop padding", 5, 100, 35, 5)
         alpha_threshold = st.slider("White removal threshold", 235, 254, 248, 1)
         alpha_softness = st.slider("Edge softness", 6, 35, 18, 1)
 
-    if st.button("✨ Extract signature only", type="primary", use_container_width=True):
+    if st.button("✨ Create signature preview", type="primary", use_container_width=True):
         start = time.time()
 
         try:
-            with st.spinner("Checking photo and extracting signature..."):
+            with st.spinner("Checking photo and preparing preview..."):
                 final_img, method, reason = process_signature_only(
                     image=original,
                     model_name=model_name,
@@ -1062,7 +1163,7 @@ if uploaded_file:
                 st.session_state.final_clean_rgba = final_img
                 st.session_state.method_used = method
                 st.session_state.quality_reason = reason
-                st.success(f"Done in {elapsed:.2f} seconds.")
+                st.success(f"Preview ready in {elapsed:.2f} seconds.")
 
         except Exception as e:
             st.session_state.final_clean_rgba = None
@@ -1072,11 +1173,6 @@ if uploaded_file:
 
 if st.session_state.final_clean_rgba is not None and st.session_state.method_used != "Rejected":
     st.markdown("---")
-
-    st.info(
-        f"Method used: {st.session_state.method_used} — "
-        f"{st.session_state.quality_reason}"
-    )
 
     preview_img = get_user_visible_preview(
         st.session_state.final_clean_rgba,
@@ -1088,7 +1184,7 @@ if st.session_state.final_clean_rgba is not None and st.session_state.method_use
     st.image(
         preview_transparent_image(preview_img),
         caption=(
-            f"Signature only — "
+            f"Signature preview — "
             f"{st.session_state.final_clean_rgba.width}px × "
             f"{st.session_state.final_clean_rgba.height}px"
         ),
@@ -1096,6 +1192,8 @@ if st.session_state.final_clean_rgba is not None and st.session_state.method_use
     )
 
     if st.session_state.paid:
+        st.success("Unlocked. Your clean signature files are ready.")
+
         st.markdown(
             pil_png_download_link(
                 st.session_state.final_clean_rgba,
@@ -1156,6 +1254,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown(
-    '<div class="footer-note">Signature-only transparent PNG extractor with payment unlock flow</div>',
+    '<div class="footer-note">Signature-only transparent PNG extractor with secure unlock flow</div>',
     unsafe_allow_html=True,
 )

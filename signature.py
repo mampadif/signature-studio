@@ -1,12 +1,15 @@
 """
 Signature Studio Pro
-Final updated script:
-- Extracts ONLY the signature
-- Removes far-away dirty artifacts
-- Crops around the main signature cluster only
-- Produces centered transparent PNG
-- Word-ready DOCX export uses the tight cropped signature
+Final safer version for JPG/JPEG/PNG/WebP uploads.
+
+Fixes:
+- Handles JPEG uploads
+- Ignores large dark shadows/objects
+- Crops around the signature, not the whole page
+- Preserves strokes with soft transparency
 - Gemini-first extraction with local fallback
+- Protected preview for unpaid users
+- Word-ready DOCX export
 
 requirements.txt:
 streamlit
@@ -65,7 +68,7 @@ def load_config() -> AppConfig:
     if "GEMINI_API_KEY" not in st.secrets:
         raise RuntimeError(
             """
-GEMINI_API_KEY missing in Streamlit secrets.
+Missing GEMINI_API_KEY in Streamlit Secrets.
 
 Add:
 GEMINI_API_KEY = "your_key_here"
@@ -89,7 +92,7 @@ CONFIG = load_config()
 
 
 # =========================================================
-# STREAMLIT SETUP
+# STREAMLIT
 # =========================================================
 
 st.set_page_config(
@@ -111,10 +114,6 @@ for key, value in DEFAULT_SESSION_KEYS.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
-
-# =========================================================
-# CSS
-# =========================================================
 
 st.markdown("""
 <style>
@@ -217,58 +216,127 @@ def smart_resize_for_processing(image: Image.Image, max_pixels: int = 2400) -> I
     )
 
 
+def connected_components(mask):
+    """
+    8-connected components for a boolean mask.
+    """
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    components = []
+
+    for y in range(height):
+        for x in range(width):
+            if not mask[y, x] or visited[y, x]:
+                continue
+
+            stack = [(y, x)]
+            visited[y, x] = True
+            pixels = []
+
+            while stack:
+                cy, cx = stack.pop()
+                pixels.append((cy, cx))
+
+                for ny in range(cy - 1, cy + 2):
+                    for nx in range(cx - 1, cx + 2):
+                        if 0 <= ny < height and 0 <= nx < width:
+                            if not visited[ny, nx] and mask[ny, nx]:
+                                visited[ny, nx] = True
+                                stack.append((ny, nx))
+
+            components.append(pixels)
+
+    return components
+
+
 def detect_signature_bbox(
     image: Image.Image,
-    darkness_threshold: int = 150,
-    padding: int = 25,
+    darkness_threshold: int = 170,
+    padding: int = 35,
 ) -> Image.Image:
     """
-    Crop the image around likely dark ink before Gemini/local processing.
+    Safer detector:
+    - works with JPEG
+    - ignores large dark blocks/shadows
+    - ignores components touching image border
+    - chooses the best thin/line-like component as signature
     """
-    rgb = image.convert("RGB")
+    image = image.convert("RGB")
 
-    if HAS_NUMPY:
-        arr = np.array(rgb, dtype=np.uint8)
+    if not HAS_NUMPY:
+        return image.copy()
 
-        gray = (
-            0.299 * arr[:, :, 0]
-            + 0.587 * arr[:, :, 1]
-            + 0.114 * arr[:, :, 2]
-        ).astype(np.uint8)
+    arr = np.array(image, dtype=np.uint8)
+    gray = (
+        0.299 * arr[:, :, 0]
+        + 0.587 * arr[:, :, 1]
+        + 0.114 * arr[:, :, 2]
+    ).astype(np.uint8)
 
-        mask = gray < darkness_threshold
-        coords = np.argwhere(mask)
+    mask = gray < darkness_threshold
+    h, w = mask.shape
 
-        if coords.size == 0:
-            return image.copy()
+    components = connected_components(mask)
 
-        y_min, x_min = coords.min(axis=0)
-        y_max, x_max = coords.max(axis=0)
+    candidates = []
 
-    else:
-        gray = rgb.convert("L")
-        px = gray.load()
+    for pixels in components:
+        if len(pixels) < 20:
+            continue
 
-        x_min, y_min = image.width, image.height
-        x_max, y_max = 0, 0
-        found = False
+        ys = [p[0] for p in pixels]
+        xs = [p[1] for p in pixels]
 
-        for y in range(image.height):
-            for x in range(image.width):
-                if px[x, y] < darkness_threshold:
-                    found = True
-                    x_min = min(x_min, x)
-                    y_min = min(y_min, y)
-                    x_max = max(x_max, x)
-                    y_max = max(y_max, y)
+        y1, y2 = min(ys), max(ys)
+        x1, x2 = min(xs), max(xs)
 
-        if not found:
-            return image.copy()
+        comp_w = x2 - x1 + 1
+        comp_h = y2 - y1 + 1
+        box_area = max(1, comp_w * comp_h)
+        fill_ratio = len(pixels) / box_area
 
-    x1 = max(0, int(x_min) - padding)
-    y1 = max(0, int(y_min) - padding)
-    x2 = min(image.width, int(x_max) + padding)
-    y2 = min(image.height, int(y_max) + padding)
+        touches_border = (
+            x1 <= 3 or y1 <= 3 or
+            x2 >= w - 4 or y2 >= h - 4
+        )
+
+        too_large = box_area > (w * h * 0.08)
+        too_solid = fill_ratio > 0.45
+
+        # Ignore huge shadows, black objects, page borders, laptop/phone edges
+        if touches_border or too_large or too_solid:
+            continue
+
+        # Signature strokes are usually thin and wide-ish
+        aspect = comp_w / max(1, comp_h)
+        score = len(pixels)
+
+        # Prefer line-like components
+        if aspect > 1.0:
+            score *= 1.4
+
+        # Avoid tiny punctuation-like specks
+        if comp_w < 20 or comp_h < 8:
+            continue
+
+        candidates.append((score, pixels))
+
+    if not candidates:
+        # Last-resort: crop central region to avoid bottom shadows dominating
+        return image.copy()
+
+    best_pixels = max(candidates, key=lambda item: item[0])[1]
+
+    ys = [p[0] for p in best_pixels]
+    xs = [p[1] for p in best_pixels]
+
+    y1, y2 = min(ys), max(ys)
+    x1, x2 = min(xs), max(xs)
+
+    x1 = max(0, x1 - padding)
+    y1 = max(0, y1 - padding)
+    x2 = min(w, x2 + padding)
+    y2 = min(h, y2 + padding)
 
     return image.crop((x1, y1, x2, y2))
 
@@ -320,9 +388,6 @@ def white_to_transparent_soft(
     threshold: int = 248,
     softness: int = 18,
 ) -> Image.Image:
-    """
-    Converts white/near-white background to transparent while preserving soft pen edges.
-    """
     image = image.convert("RGBA")
     soft_start = max(0, threshold - softness)
 
@@ -350,7 +415,6 @@ def white_to_transparent_soft(
         return Image.fromarray(arr, mode="RGBA")
 
     new_pixels = []
-
     for r, g, b, a in image.getdata():
         brightness = (r + g + b) / 3
 
@@ -371,9 +435,6 @@ def white_to_transparent_soft(
 
 
 def remove_small_noise(image: Image.Image, alpha_cutoff: int = 25) -> Image.Image:
-    """
-    Removes faint transparent residue without destroying real strokes.
-    """
     image = image.convert("RGBA")
 
     if HAS_NUMPY:
@@ -402,47 +463,9 @@ def remove_small_noise(image: Image.Image, alpha_cutoff: int = 25) -> Image.Imag
     return image
 
 
-def connected_components(mask):
-    """
-    Finds connected components in a boolean mask using 8-connectivity.
-    Returns list of arrays of coordinates.
-    """
-    height, width = mask.shape
-    visited = np.zeros_like(mask, dtype=bool)
-    components = []
-
-    for y in range(height):
-        for x in range(width):
-            if not mask[y, x] or visited[y, x]:
-                continue
-
-            stack = [(y, x)]
-            visited[y, x] = True
-            pixels = []
-
-            while stack:
-                cy, cx = stack.pop()
-                pixels.append((cy, cx))
-
-                for ny in range(cy - 1, cy + 2):
-                    for nx in range(cx - 1, cx + 2):
-                        if ny == cy and nx == cx:
-                            continue
-
-                        if 0 <= ny < height and 0 <= nx < width:
-                            if mask[ny, nx] and not visited[ny, nx]:
-                                visited[ny, nx] = True
-                                stack.append((ny, nx))
-
-            components.append(pixels)
-
-    return components
-
-
 def keep_signature_cluster_only(image: Image.Image, min_area: int = 20, margin: int = 45) -> Image.Image:
     """
-    Keeps the main signature cluster and nearby components.
-    Removes far-away artifacts like dirty pixels in a top corner.
+    Removes far-away artifacts after alpha extraction.
     """
     image = image.convert("RGBA")
 
@@ -454,7 +477,6 @@ def keep_signature_cluster_only(image: Image.Image, min_area: int = 20, margin: 
     mask = alpha > 0
 
     components = connected_components(mask)
-
     components = [c for c in components if len(c) >= min_area]
 
     if not components:
@@ -489,7 +511,6 @@ def keep_signature_cluster_only(image: Image.Image, min_area: int = 20, margin: 
                 keep[y, x] = True
 
     arr[~keep, 3] = 0
-
     return Image.fromarray(arr, mode="RGBA")
 
 
@@ -511,9 +532,6 @@ def tight_crop_alpha(image: Image.Image, padding: int = 8) -> Image.Image:
 
 
 def center_signature_canvas(image: Image.Image) -> Image.Image:
-    """
-    Removes off-center transparent canvas.
-    """
     image = image.convert("RGBA")
     bbox = image.getchannel("A").getbbox()
 
@@ -537,14 +555,6 @@ def resize_signature_only(
 
 
 def finalize_signature_only(image: Image.Image) -> Image.Image:
-    """
-    Final cleanup:
-    - preserve stroke edges
-    - remove far-away dirt
-    - crop around signature cluster only
-    - resize last
-    - keep safe padding without page-sized canvas
-    """
     image = image.convert("RGBA")
 
     image = remove_small_noise(image, alpha_cutoff=25)
@@ -623,9 +633,6 @@ The result should look like a cropped signature PNG, not a photo of paper.
 # =========================================================
 
 def local_signature_cutout(image: Image.Image, threshold: int = 150) -> Image.Image:
-    """
-    Local fallback using dark ink segmentation.
-    """
     image = image.convert("RGBA")
 
     if HAS_NUMPY:
@@ -696,7 +703,7 @@ def process_signature_only(
 
             final = finalize_signature_only(transparent)
 
-            return final, "Gemini", "Signature extracted and cropped around main signature cluster."
+            return final, "Gemini", "Signature extracted from safe crop."
 
         except Exception as e:
             fallback = local_signature_cutout(crop_for_gemini, threshold=150)
@@ -751,7 +758,6 @@ def create_word_ready_docx(signature_img: Image.Image) -> bytes:
     signature_img = finalize_signature_only(signature_img)
 
     doc = Document()
-
     doc.add_heading("Word-ready signature", level=1)
     doc.add_paragraph(
         "Copy this signature image and paste it into your document. "
@@ -759,8 +765,6 @@ def create_word_ready_docx(signature_img: Image.Image) -> bytes:
     )
 
     img_stream = io.BytesIO(png_bytes_with_metadata(signature_img))
-
-    # Natural signature size in Word
     doc.add_picture(img_stream, width=Inches(2.0))
 
     doc.add_paragraph("")
@@ -849,16 +853,15 @@ st.markdown(f"""
 <div class="hero">
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
-        Upload a signature photo and get only the cropped-out signature as a clean transparent PNG.
-        The output is cropped around the main signature cluster, so far-away dirt no longer makes the Word outline huge.
+        Upload a JPEG, PNG, or WebP signature photo. The app safely ignores large dark shadows
+        and extracts only the signature as a transparent PNG.
     </p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="tip-box">
-<strong>Goal:</strong> centered transparent signature thumbnail with a tight Word selection box.<br>
-Use dark ink and take the photo close to the signature for best results.
+<strong>Tip:</strong> JPEG is supported. For best results, keep the signature close, avoid shadows, and avoid large dark objects in the frame.
 </div>
 """, unsafe_allow_html=True)
 
@@ -888,8 +891,8 @@ if uploaded_file:
 
     with st.expander("Processing settings", expanded=False):
         model_name = st.text_input("Gemini model", value=CONFIG.gemini_model)
-        darkness_threshold = st.slider("Ink detection threshold", 100, 190, 150, 2)
-        crop_padding = st.slider("Crop padding", 5, 80, 25, 5)
+        darkness_threshold = st.slider("Ink detection threshold", 100, 220, 170, 2)
+        crop_padding = st.slider("Crop padding", 5, 100, 35, 5)
         alpha_threshold = st.slider("White removal threshold", 235, 254, 248, 1)
         alpha_softness = st.slider("Edge softness", 6, 35, 18, 1)
 
@@ -973,6 +976,6 @@ if st.session_state.final_clean_rgba is not None:
 
 st.markdown("---")
 st.markdown(
-    '<div class="footer-note">Signature-only transparent PNG extractor with main-cluster cropping and Word-ready export</div>',
+    '<div class="footer-note">Signature-only transparent PNG extractor with safer JPEG crop detection</div>',
     unsafe_allow_html=True,
 )

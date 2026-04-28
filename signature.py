@@ -159,8 +159,8 @@ def create_card_checkout_url() -> str | None:
                     "quantity": 1,
                 }
             ],
-            success_url=f"{CONFIG.app_url}?paid=1&session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{CONFIG.app_url}?cancelled=1",
+            success_url=CONFIG.app_url + "?paid=1&session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=CONFIG.app_url + "?cancelled=1",
         )
 
         return session.url
@@ -897,7 +897,7 @@ def process_signature_only(
             ok, reason = score_output_quality(fallback)
 
             if ok:
-                return fallback, "Standard cleanup", f"Enhanced cleanup unavailable: {e}"
+                return fallback, "Standard cleanup", "Enhanced cleanup unavailable: " + str(e)
 
             return None, "Rejected", reason
 
@@ -1020,6 +1020,24 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 def payment_cta() -> None:
     checkout_url = create_card_checkout_url()
     
+    # Debug information - shows why card payment might not be available
+    if not checkout_url:
+        debug_messages = []
+        debug_messages.append("Debug: Card payment not available. Reasons:")
+        if not STRIPE_AVAILABLE:
+            debug_messages.append("- Stripe package not installed. Add 'stripe' to requirements.txt")
+        if not CONFIG.stripe_secret_key:
+            debug_messages.append("- STRIPE_SECRET_KEY is empty in Streamlit secrets")
+        if not CONFIG.stripe_price_id_signature:
+            debug_messages.append("- STRIPE_PRICE_ID_SIGNATURE is empty in Streamlit secrets")
+        if not CONFIG.app_url:
+            debug_messages.append("- APP_URL is empty in Streamlit secrets")
+        if STRIPE_AVAILABLE and CONFIG.stripe_secret_key and CONFIG.stripe_price_id_signature and CONFIG.app_url:
+            debug_messages.append("- Stripe session creation failed. Check your API keys and Price ID are valid")
+        
+        for msg in debug_messages:
+            st.info(msg)
+    
     # Open payment card container
     st.markdown('<div class="payment-card">', unsafe_allow_html=True)
     
@@ -1033,40 +1051,48 @@ def payment_cta() -> None:
         unsafe_allow_html=True
     )
     
-    # Open payment options container
-    st.markdown('<div class="payment-options">', unsafe_allow_html=True)
+    # Check what payment methods are available
+    has_card = checkout_url is not None
+    has_paypal_url = bool(CONFIG.paypal_payment_url)
+    has_paypal_email = bool(CONFIG.paypal_email)
     
-    # Card payment button (Stripe)
-    if checkout_url:
-        card_html = (
-            '<a class="payment-btn" href="' + checkout_url + '" target="_self">'
-            '💳 Pay with Card — ' + CONFIG.price_display + '</a>'
-        )
-        st.markdown(card_html, unsafe_allow_html=True)
-    
-    # PayPal payment button
-    if CONFIG.paypal_payment_url:
-        paypal_html = (
-            '<a class="paypal-btn" href="' + CONFIG.paypal_payment_url + '" target="_blank">'
-            'Pay with PayPal — ' + CONFIG.price_display + '</a>'
-        )
-        st.markdown(paypal_html, unsafe_allow_html=True)
-    elif CONFIG.paypal_email:
-        paypal_html = (
-            '<div class="payment-secondary">Pay with PayPal to <strong>' + 
-            CONFIG.paypal_email + '</strong>, then enter your unlock code.</div>'
-        )
-        st.markdown(paypal_html, unsafe_allow_html=True)
-    
-    # If no payment methods configured
-    if not checkout_url and not CONFIG.paypal_payment_url and not CONFIG.paypal_email:
+    if has_card or has_paypal_url or has_paypal_email:
+        # Open payment options container
+        st.markdown('<div class="payment-options">', unsafe_allow_html=True)
+        
+        # Card payment button (Stripe)
+        if has_card:
+            card_html = (
+                '<a class="payment-btn" href="' + checkout_url + '" target="_self">'
+                '💳 Pay with Card — ' + CONFIG.price_display + '</a>'
+            )
+            st.markdown(card_html, unsafe_allow_html=True)
+        
+        # PayPal payment button
+        if has_paypal_url:
+            paypal_html = (
+                '<a class="paypal-btn" href="' + CONFIG.paypal_payment_url + '" target="_blank">'
+                'Pay with PayPal — ' + CONFIG.price_display + '</a>'
+            )
+            st.markdown(paypal_html, unsafe_allow_html=True)
+        elif has_paypal_email:
+            paypal_html = (
+                '<div class="payment-secondary">Pay with PayPal to <strong>' + 
+                CONFIG.paypal_email + '</strong>, then enter your unlock code.</div>'
+            )
+            st.markdown(paypal_html, unsafe_allow_html=True)
+        
+        # Close payment options container
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        # No payment methods configured at all
         st.markdown(
-            '<div class="payment-secondary">Payment options are not configured yet.</div>',
+            '<div class="payment-options">'
+            '<div class="payment-secondary">No payment methods configured. '
+            'Please set up Stripe or PayPal in Streamlit Cloud secrets.</div>'
+            '</div>',
             unsafe_allow_html=True
         )
-    
-    # Close payment options container
-    st.markdown('</div>', unsafe_allow_html=True)
     
     # Footer note
     st.markdown(

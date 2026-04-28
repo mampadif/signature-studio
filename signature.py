@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import io
+import textwrap  # <-- added for dedent
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -1042,53 +1043,53 @@ def payment_cta() -> None:
 
     card_button = ""
     if checkout_url:
-        card_button = f"""
-        <a class="payment-btn" href="{checkout_url}" target="_self">
-            💳 Pay with Card — {CONFIG.price_display}
-        </a>
-        """
+        card_button = textwrap.dedent(f"""\
+            <a class="payment-btn" href="{checkout_url}" target="_self">
+                💳 Pay with Card — {CONFIG.price_display}
+            </a>
+        """)
 
     paypal_button = ""
     if CONFIG.paypal_payment_url:
-        paypal_button = f"""
-        <a class="paypal-btn" href="{CONFIG.paypal_payment_url}" target="_blank">
-            Pay with PayPal — {CONFIG.price_display}
-        </a>
-        """
+        paypal_button = textwrap.dedent(f"""\
+            <a class="paypal-btn" href="{CONFIG.paypal_payment_url}" target="_blank">
+                Pay with PayPal — {CONFIG.price_display}
+            </a>
+        """)
     elif CONFIG.paypal_email:
-        paypal_button = f"""
-        <div class="payment-secondary">
-            Pay with PayPal to <strong>{CONFIG.paypal_email}</strong>, then enter your unlock code.
-        </div>
-        """
+        paypal_button = textwrap.dedent(f"""\
+            <div class="payment-secondary">
+                Pay with PayPal to <strong>{CONFIG.paypal_email}</strong>, then enter your unlock code.
+            </div>
+        """)
 
     if card_button or paypal_button:
-        payment_options = f"""
-        <div class="payment-options">
-            {card_button}
-            {paypal_button}
-        </div>
-        """
+        payment_options = textwrap.dedent(f"""\
+            <div class="payment-options">
+                {card_button}
+                {paypal_button}
+            </div>
+        """)
     else:
-        payment_options = """
-        <div class="payment-secondary">
-            Payment options are not configured yet.
-        </div>
-        """
+        payment_options = textwrap.dedent("""\
+            <div class="payment-secondary">
+                Payment options are not configured yet.
+            </div>
+        """)
 
-    html = f"""
-    <div class="payment-card">
-        <h3>🔓 Unlock clean signature files</h3>
-        <p>
-            Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
-            to download the clean transparent PNG and Word-ready signature file.
-        </p>
-        {payment_options}
-        <div class="payment-secondary">
-            Choose your preferred payment method. Downloads unlock after payment.
+    html = textwrap.dedent(f"""\
+        <div class="payment-card">
+            <h3>🔓 Unlock clean signature files</h3>
+            <p>
+                Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
+                to download the clean transparent PNG and Word-ready signature file.
+            </p>
+            {payment_options}
+            <div class="payment-secondary">
+                Choose your preferred payment method. Downloads unlock after payment.
+            </div>
         </div>
-    </div>
-    """
+    """)
 
     st.markdown(html, unsafe_allow_html=True)
 

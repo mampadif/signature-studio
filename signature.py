@@ -120,7 +120,7 @@ for key, value in DEFAULT_SESSION_KEYS.items():
 # PAYMENT
 # =========================================================
 
-def verify_stripe_payment_from_query() -> bool:
+def verify_card_payment_from_query() -> bool:
     if not STRIPE_AVAILABLE:
         return False
 
@@ -141,7 +141,7 @@ def verify_stripe_payment_from_query() -> bool:
         return False
 
 
-def create_stripe_checkout_url() -> str | None:
+def create_card_checkout_url() -> str | None:
     if not STRIPE_AVAILABLE:
         return None
 
@@ -169,7 +169,7 @@ def create_stripe_checkout_url() -> str | None:
         return None
 
 
-if verify_stripe_payment_from_query():
+if verify_card_payment_from_query():
     st.session_state.paid = True
 
 
@@ -1038,13 +1038,13 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 
 
 def payment_cta() -> None:
-    checkout_url = create_stripe_checkout_url()
+    checkout_url = create_card_checkout_url()
 
-    stripe_button = ""
+    card_button = ""
     if checkout_url:
-        stripe_button = f"""
+        card_button = f"""
         <a class="payment-btn" href="{checkout_url}" target="_self">
-            💳 Pay by Card / Visa — {CONFIG.price_display}
+            💳 Pay with Card — {CONFIG.price_display}
         </a>
         """
 
@@ -1058,41 +1058,39 @@ def payment_cta() -> None:
     elif CONFIG.paypal_email:
         paypal_button = f"""
         <div class="payment-secondary">
-            PayPal option: send {CONFIG.price_display} to <strong>{CONFIG.paypal_email}</strong>,
-            then use your unlock code.
+            Pay with PayPal to <strong>{CONFIG.paypal_email}</strong>, then enter your unlock code.
         </div>
         """
 
-    if not stripe_button and not paypal_button:
-        payment_options = """
-        <div class="payment-secondary">
-            Payment setup is incomplete. Add Stripe or PayPal details in Streamlit secrets.
-        </div>
-        """
-    else:
+    if card_button or paypal_button:
         payment_options = f"""
         <div class="payment-options">
-            {stripe_button}
+            {card_button}
             {paypal_button}
         </div>
         """
-
-    st.markdown(
-        f"""
-        <div class="payment-card">
-            <h3>🔓 Unlock clean signature files</h3>
-            <p>
-                Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
-                to download the clean transparent PNG and Word-ready signature file.
-            </p>
-            {payment_options}
-            <div class="payment-secondary">
-                Card payments are handled through Stripe. PayPal is available as an alternative.
-            </div>
+    else:
+        payment_options = """
+        <div class="payment-secondary">
+            Payment options are not configured yet.
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        """
+
+    html = f"""
+    <div class="payment-card">
+        <h3>🔓 Unlock clean signature files</h3>
+        <p>
+            Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
+            to download the clean transparent PNG and Word-ready signature file.
+        </p>
+        {payment_options}
+        <div class="payment-secondary">
+            Choose your preferred payment method. Downloads unlock after payment.
+        </div>
+    </div>
+    """
+
+    st.markdown(html, unsafe_allow_html=True)
 
     if CONFIG.unlock_code:
         with st.expander("Already paid? Enter unlock code"):

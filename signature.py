@@ -1,11 +1,13 @@
 """
 Signature Studio Pro
-Corrected version:
+Complete version:
+- Small uploaded-image preview inside expander
 - Upload guide
 - JPEG/PNG/WebP support
-- Rejects poor/noisy outputs
+- Upload quality validation
 - Gemini-first extraction
 - Local fallback
+- Rejects noisy/bad outputs
 - Transparent PNG download
 - Word-ready DOCX download
 - Usage guide
@@ -16,6 +18,13 @@ pillow
 numpy
 google-genai>=1.0.0
 python-docx
+
+Streamlit Cloud secrets:
+GEMINI_API_KEY = "your_key_here"
+GEMINI_MODEL = "gemini-3.1-flash-image-preview"
+APP_NAME = "Signature Studio Pro"
+GEMINI_ENABLED = true
+MAX_GEMINI_CALLS_PER_SESSION = 3
 """
 
 from __future__ import annotations
@@ -43,6 +52,10 @@ except ImportError:
     DOCX_AVAILABLE = False
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 @dataclass
 class AppConfig:
     gemini_api_key: str
@@ -54,7 +67,18 @@ class AppConfig:
 
 def load_config() -> AppConfig:
     if "GEMINI_API_KEY" not in st.secrets:
-        raise RuntimeError("Missing GEMINI_API_KEY in Streamlit Secrets.")
+        raise RuntimeError(
+            """
+Missing GEMINI_API_KEY in Streamlit Secrets.
+
+Add:
+GEMINI_API_KEY = "your_key_here"
+GEMINI_MODEL = "gemini-3.1-flash-image-preview"
+APP_NAME = "Signature Studio Pro"
+GEMINI_ENABLED = true
+MAX_GEMINI_CALLS_PER_SESSION = 3
+"""
+        )
 
     return AppConfig(
         gemini_api_key=st.secrets["GEMINI_API_KEY"],
@@ -66,6 +90,11 @@ def load_config() -> AppConfig:
 
 
 CONFIG = load_config()
+
+
+# =========================================================
+# STREAMLIT SETUP
+# =========================================================
 
 st.set_page_config(
     page_title=CONFIG.app_name,
@@ -87,6 +116,10 @@ for key, value in DEFAULT_SESSION_KEYS.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
+
+# =========================================================
+# CSS
+# =========================================================
 
 st.markdown("""
 <style>
@@ -140,6 +173,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# =========================================================
+# GEMINI
+# =========================================================
+
 def get_genai_client():
     if not CONFIG.gemini_enabled:
         raise RuntimeError("Gemini disabled via configuration.")
@@ -161,11 +198,21 @@ def increment_gemini_usage() -> None:
     st.session_state.gemini_calls_used += 1
 
 
+# =========================================================
+# IMAGE HELPERS
+# =========================================================
+
 def fix_image_orientation(image: Image.Image) -> Image.Image:
     try:
         return ImageOps.exif_transpose(image)
     except Exception:
         return image
+
+
+def make_upload_preview(image: Image.Image, max_size: int = 420) -> Image.Image:
+    preview = image.copy()
+    preview.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    return preview
 
 
 def smart_resize_for_processing(image: Image.Image, max_pixels: int = 2400) -> Image.Image:
@@ -219,6 +266,7 @@ def validate_upload_quality(image: Image.Image) -> Tuple[bool, str]:
     arr = np.array(img, dtype=np.uint8)
 
     h, w, _ = arr.shape
+
     if w < 250 or h < 250:
         return False, "Image is too small. Please upload a clearer, larger photo."
 
@@ -273,7 +321,6 @@ def detect_signature_bbox(
     h, w = mask.shape
 
     components = connected_components(mask)
-
     candidates = []
 
     for pixels in components:
@@ -369,6 +416,10 @@ def preview_transparent_image(sig_img: Image.Image) -> Image.Image:
     out.paste(sig_img, (0, 0), sig_img)
     return out
 
+
+# =========================================================
+# TRANSPARENCY + CLEANUP
+# =========================================================
 
 def white_to_transparent_soft(
     image: Image.Image,
@@ -533,10 +584,6 @@ def finalize_signature_only(image: Image.Image) -> Image.Image:
 
 
 def score_output_quality(image: Image.Image) -> Tuple[bool, str]:
-    """
-    Strong output quality gate.
-    Rejects noisy fallback results before showing/download buttons.
-    """
     if not HAS_NUMPY:
         return True, "Output quality check skipped."
 
@@ -582,6 +629,10 @@ def score_output_quality(image: Image.Image) -> Tuple[bool, str]:
 
     return True, "Output quality passed."
 
+
+# =========================================================
+# GEMINI EXTRACTION
+# =========================================================
 
 def ask_gemini_extract_signature_only(
     cropped_image: Image.Image,
@@ -632,6 +683,10 @@ The result should look like a cropped signature PNG, not a photo of paper.
 
     raise RuntimeError("Gemini did not return an image.")
 
+
+# =========================================================
+# LOCAL FALLBACK
+# =========================================================
 
 def local_signature_cutout(image: Image.Image, threshold: int = 150) -> Image.Image:
     image = image.convert("RGBA")
@@ -723,6 +778,10 @@ def process_signature_only(
     return None, "Rejected", reason
 
 
+# =========================================================
+# DOWNLOADS
+# =========================================================
+
 def png_bytes_with_metadata(img: Image.Image) -> bytes:
     meta = PngImagePlugin.PngInfo()
     meta.add_text("SignatureUse", "Insert as image. In Word/Google Docs, set layout to In Front of Text.")
@@ -804,6 +863,10 @@ def docx_download_link(docx_bytes: bytes, filename: str, label: str) -> str:
     """
 
 
+# =========================================================
+# PREVIEW PROTECTION
+# =========================================================
+
 def add_preview_protection(
     image: Image.Image,
     text: str = "PREVIEW • PAY TO UNLOCK",
@@ -846,6 +909,10 @@ def add_preview_protection(
 def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
     return image if paid else add_preview_protection(image)
 
+
+# =========================================================
+# UI
+# =========================================================
 
 st.markdown(f"""
 <div class="hero">
@@ -895,7 +962,13 @@ if uploaded_file:
     original = Image.open(uploaded_file)
     original = fix_image_orientation(original)
 
-    st.image(original, caption="Uploaded photo", use_container_width=True)
+    with st.expander("View uploaded photo preview", expanded=False):
+        preview = make_upload_preview(original, max_size=420)
+        st.image(
+            preview,
+            caption=f"Uploaded photo preview — original size {original.width}px × {original.height}px",
+            use_container_width=False,
+        )
 
     with st.expander("Processing settings", expanded=False):
         model_name = st.text_input("Gemini model", value=CONFIG.gemini_model)

@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import base64
 import io
-import textwrap  # <-- added for dedent
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -921,22 +920,7 @@ def pil_png_download_link(img: Image.Image, filename: str, label: str) -> str:
     png_bytes = png_bytes_with_metadata(img)
     b64 = base64.b64encode(png_bytes).decode()
 
-    return f"""
-    <a href="data:image/png;base64,{b64}" download="{filename}"
-       style="
-            display:inline-block;
-            text-decoration:none;
-            background:linear-gradient(90deg,#111827 0%, #374151 100%);
-            color:white;
-            padding:0.75rem 1rem;
-            border-radius:999px;
-            font-weight:700;
-            font-size:0.95rem;
-            margin:0.25rem;
-       ">
-       {label}
-    </a>
-    """
+    return f"""<a href="data:image/png;base64,{b64}" download="{filename}" style="display:inline-block;text-decoration:none;background:linear-gradient(90deg,#111827 0%, #374151 100%);color:white;padding:0.75rem 1rem;border-radius:999px;font-weight:700;font-size:0.95rem;margin:0.25rem;">{label}</a>"""
 
 
 def create_word_ready_docx(signature_img: Image.Image) -> bytes:
@@ -967,23 +951,7 @@ def create_word_ready_docx(signature_img: Image.Image) -> bytes:
 def docx_download_link(docx_bytes: bytes, filename: str, label: str) -> str:
     b64 = base64.b64encode(docx_bytes).decode()
 
-    return f"""
-    <a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}"
-       download="{filename}"
-       style="
-            display:inline-block;
-            text-decoration:none;
-            background:linear-gradient(90deg,#2563EB 0%, #1D4ED8 100%);
-            color:white;
-            padding:0.75rem 1rem;
-            border-radius:999px;
-            font-weight:700;
-            font-size:0.95rem;
-            margin:0.25rem;
-       ">
-       {label}
-    </a>
-    """
+    return f"""<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{filename}" style="display:inline-block;text-decoration:none;background:linear-gradient(90deg,#2563EB 0%, #1D4ED8 100%);color:white;padding:0.75rem 1rem;border-radius:999px;font-weight:700;font-size:0.95rem;margin:0.25rem;">{label}</a>"""
 
 
 # =========================================================
@@ -1041,55 +1009,53 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 def payment_cta() -> None:
     checkout_url = create_card_checkout_url()
 
+    # Card button
     card_button = ""
     if checkout_url:
-        card_button = textwrap.dedent(f"""\
-            <a class="payment-btn" href="{checkout_url}" target="_self">
-                💳 Pay with Card — {CONFIG.price_display}
-            </a>
-        """)
+        card_button = f"""\
+<a class="payment-btn" href="{checkout_url}" target="_self">
+    💳 Pay with Card — {CONFIG.price_display}
+</a>"""
 
+    # PayPal button
     paypal_button = ""
     if CONFIG.paypal_payment_url:
-        paypal_button = textwrap.dedent(f"""\
-            <a class="paypal-btn" href="{CONFIG.paypal_payment_url}" target="_blank">
-                Pay with PayPal — {CONFIG.price_display}
-            </a>
-        """)
+        paypal_button = f"""\
+<a class="paypal-btn" href="{CONFIG.paypal_payment_url}" target="_blank">
+    Pay with PayPal — {CONFIG.price_display}
+</a>"""
     elif CONFIG.paypal_email:
-        paypal_button = textwrap.dedent(f"""\
-            <div class="payment-secondary">
-                Pay with PayPal to <strong>{CONFIG.paypal_email}</strong>, then enter your unlock code.
-            </div>
-        """)
+        paypal_button = f"""\
+<div class="payment-secondary">
+    Pay with PayPal to <strong>{CONFIG.paypal_email}</strong>, then enter your unlock code.
+</div>"""
 
+    # Payment options wrapper
     if card_button or paypal_button:
-        payment_options = textwrap.dedent(f"""\
-            <div class="payment-options">
-                {card_button}
-                {paypal_button}
-            </div>
-        """)
+        payment_options = f"""\
+<div class="payment-options">
+    {card_button}
+    {paypal_button}
+</div>"""
     else:
-        payment_options = textwrap.dedent("""\
-            <div class="payment-secondary">
-                Payment options are not configured yet.
-            </div>
-        """)
+        payment_options = """\
+<div class="payment-secondary">
+    Payment options are not configured yet.
+</div>"""
 
-    html = textwrap.dedent(f"""\
-        <div class="payment-card">
-            <h3>🔓 Unlock clean signature files</h3>
-            <p>
-                Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
-                to download the clean transparent PNG and Word-ready signature file.
-            </p>
-            {payment_options}
-            <div class="payment-secondary">
-                Choose your preferred payment method. Downloads unlock after payment.
-            </div>
-        </div>
-    """)
+    # Final HTML card - ZERO INDENTATION STRINGS
+    html = f"""\
+<div class="payment-card">
+    <h3>🔓 Unlock clean signature files</h3>
+    <p>
+        Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
+        to download the clean transparent PNG and Word-ready signature file.
+    </p>
+    {payment_options}
+    <div class="payment-secondary">
+        Choose your preferred payment method. Downloads unlock after payment.
+    </div>
+</div>"""
 
     st.markdown(html, unsafe_allow_html=True)
 

@@ -1,15 +1,14 @@
 """
 Signature Studio Pro
-Final safer version for JPG/JPEG/PNG/WebP uploads.
-
-Fixes:
-- Handles JPEG uploads
-- Ignores large dark shadows/objects
-- Crops around the signature, not the whole page
-- Preserves strokes with soft transparency
-- Gemini-first extraction with local fallback
-- Protected preview for unpaid users
-- Word-ready DOCX export
+Corrected version:
+- Upload guide
+- JPEG/PNG/WebP support
+- Rejects poor/noisy outputs
+- Gemini-first extraction
+- Local fallback
+- Transparent PNG download
+- Word-ready DOCX download
+- Usage guide
 
 requirements.txt:
 streamlit
@@ -17,13 +16,6 @@ pillow
 numpy
 google-genai>=1.0.0
 python-docx
-
-Streamlit secrets:
-GEMINI_API_KEY = "your_key_here"
-GEMINI_MODEL = "gemini-3.1-flash-image-preview"
-APP_NAME = "Signature Studio Pro"
-GEMINI_ENABLED = true
-MAX_GEMINI_CALLS_PER_SESSION = 3
 """
 
 from __future__ import annotations
@@ -51,10 +43,6 @@ except ImportError:
     DOCX_AVAILABLE = False
 
 
-# =========================================================
-# CONFIG
-# =========================================================
-
 @dataclass
 class AppConfig:
     gemini_api_key: str
@@ -66,18 +54,7 @@ class AppConfig:
 
 def load_config() -> AppConfig:
     if "GEMINI_API_KEY" not in st.secrets:
-        raise RuntimeError(
-            """
-Missing GEMINI_API_KEY in Streamlit Secrets.
-
-Add:
-GEMINI_API_KEY = "your_key_here"
-GEMINI_MODEL = "gemini-3.1-flash-image-preview"
-APP_NAME = "Signature Studio Pro"
-GEMINI_ENABLED = true
-MAX_GEMINI_CALLS_PER_SESSION = 3
-"""
-        )
+        raise RuntimeError("Missing GEMINI_API_KEY in Streamlit Secrets.")
 
     return AppConfig(
         gemini_api_key=st.secrets["GEMINI_API_KEY"],
@@ -89,11 +66,6 @@ MAX_GEMINI_CALLS_PER_SESSION = 3
 
 
 CONFIG = load_config()
-
-
-# =========================================================
-# STREAMLIT
-# =========================================================
 
 st.set_page_config(
     page_title=CONFIG.app_name,
@@ -108,6 +80,7 @@ DEFAULT_SESSION_KEYS = {
     "final_clean_rgba": None,
     "method_used": None,
     "quality_reason": None,
+    "validation_status": None,
 }
 
 for key, value in DEFAULT_SESSION_KEYS.items():
@@ -118,7 +91,7 @@ for key, value in DEFAULT_SESSION_KEYS.items():
 st.markdown("""
 <style>
 .block-container {
-    max-width: 1050px;
+    max-width: 1100px;
     padding-top: 1.1rem;
     padding-bottom: 2rem;
 }
@@ -140,7 +113,7 @@ st.markdown("""
     color: rgba(255,255,255,0.88);
     line-height: 1.6;
 }
-.tip-box {
+.guide-box {
     background: #F8FAFC;
     border: 1px solid #E2E8F0;
     border-left: 4px solid #7C3AED;
@@ -167,10 +140,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# =========================================================
-# GEMINI
-# =========================================================
-
 def get_genai_client():
     if not CONFIG.gemini_enabled:
         raise RuntimeError("Gemini disabled via configuration.")
@@ -191,10 +160,6 @@ def get_genai_client():
 def increment_gemini_usage() -> None:
     st.session_state.gemini_calls_used += 1
 
-
-# =========================================================
-# IMAGE HELPERS
-# =========================================================
 
 def fix_image_orientation(image: Image.Image) -> Image.Image:
     try:
@@ -217,9 +182,6 @@ def smart_resize_for_processing(image: Image.Image, max_pixels: int = 2400) -> I
 
 
 def connected_components(mask):
-    """
-    8-connected components for a boolean mask.
-    """
     height, width = mask.shape
     visited = np.zeros_like(mask, dtype=bool)
     components = []
@@ -240,7 +202,7 @@ def connected_components(mask):
                 for ny in range(cy - 1, cy + 2):
                     for nx in range(cx - 1, cx + 2):
                         if 0 <= ny < height and 0 <= nx < width:
-                            if not visited[ny, nx] and mask[ny, nx]:
+                            if mask[ny, nx] and not visited[ny, nx]:
                                 visited[ny, nx] = True
                                 stack.append((ny, nx))
 
@@ -249,18 +211,52 @@ def connected_components(mask):
     return components
 
 
+def validate_upload_quality(image: Image.Image) -> Tuple[bool, str]:
+    if not HAS_NUMPY:
+        return True, "Validation skipped because NumPy is unavailable."
+
+    img = image.convert("RGB")
+    arr = np.array(img, dtype=np.uint8)
+
+    h, w, _ = arr.shape
+    if w < 250 or h < 250:
+        return False, "Image is too small. Please upload a clearer, larger photo."
+
+    gray = (
+        0.299 * arr[:, :, 0]
+        + 0.587 * arr[:, :, 1]
+        + 0.114 * arr[:, :, 2]
+    ).astype(np.uint8)
+
+    dark_ratio = float((gray < 80).sum()) / max(1, w * h)
+    ink_ratio = float((gray < 170).sum()) / max(1, w * h)
+    contrast = int(gray.max()) - int(gray.min())
+
+    if dark_ratio > 0.15:
+        return False, (
+            "The photo contains a large dark object or shadow. "
+            "Retake the photo with only white paper and the signature in frame."
+        )
+
+    if ink_ratio < 0.0003:
+        return False, (
+            "The signature appears too small or too faint. "
+            "Move closer and use a darker pen."
+        )
+
+    if contrast < 45:
+        return False, (
+            "The image contrast is too low. Use darker ink and brighter lighting."
+        )
+
+    return True, "Upload quality looks acceptable."
+
+
 def detect_signature_bbox(
     image: Image.Image,
     darkness_threshold: int = 170,
     padding: int = 35,
 ) -> Image.Image:
-    """
-    Safer detector:
-    - works with JPEG
-    - ignores large dark blocks/shadows
-    - ignores components touching image border
-    - chooses the best thin/line-like component as signature
-    """
     image = image.convert("RGB")
 
     if not HAS_NUMPY:
@@ -303,26 +299,21 @@ def detect_signature_bbox(
         too_large = box_area > (w * h * 0.08)
         too_solid = fill_ratio > 0.45
 
-        # Ignore huge shadows, black objects, page borders, laptop/phone edges
         if touches_border or too_large or too_solid:
             continue
 
-        # Signature strokes are usually thin and wide-ish
         aspect = comp_w / max(1, comp_h)
         score = len(pixels)
 
-        # Prefer line-like components
         if aspect > 1.0:
             score *= 1.4
 
-        # Avoid tiny punctuation-like specks
         if comp_w < 20 or comp_h < 8:
             continue
 
         candidates.append((score, pixels))
 
     if not candidates:
-        # Last-resort: crop central region to avoid bottom shadows dominating
         return image.copy()
 
     best_pixels = max(candidates, key=lambda item: item[0])[1]
@@ -379,10 +370,6 @@ def preview_transparent_image(sig_img: Image.Image) -> Image.Image:
     return out
 
 
-# =========================================================
-# TRANSPARENCY + CLEANUP
-# =========================================================
-
 def white_to_transparent_soft(
     image: Image.Image,
     threshold: int = 248,
@@ -414,23 +401,6 @@ def white_to_transparent_soft(
 
         return Image.fromarray(arr, mode="RGBA")
 
-    new_pixels = []
-    for r, g, b, a in image.getdata():
-        brightness = (r + g + b) / 3
-
-        if brightness >= threshold:
-            new_alpha = 0
-        elif brightness <= soft_start:
-            new_alpha = 255
-        else:
-            new_alpha = int((threshold - brightness) / max(1, threshold - soft_start) * 255)
-
-        if new_alpha > 0:
-            new_pixels.append((0, 0, 0, new_alpha))
-        else:
-            new_pixels.append((255, 255, 255, 0))
-
-    image.putdata(new_pixels)
     return image
 
 
@@ -451,22 +421,10 @@ def remove_small_noise(image: Image.Image, alpha_cutoff: int = 25) -> Image.Imag
 
         return Image.fromarray(arr, mode="RGBA")
 
-    new_data = []
-
-    for r, g, b, a in image.getdata():
-        if a < alpha_cutoff:
-            new_data.append((r, g, b, 0))
-        else:
-            new_data.append((0, 0, 0, a))
-
-    image.putdata(new_data)
     return image
 
 
 def keep_signature_cluster_only(image: Image.Image, min_area: int = 20, margin: int = 45) -> Image.Image:
-    """
-    Removes far-away artifacts after alpha extraction.
-    """
     image = image.convert("RGBA")
 
     if not HAS_NUMPY:
@@ -574,9 +532,56 @@ def finalize_signature_only(image: Image.Image) -> Image.Image:
     return image
 
 
-# =========================================================
-# GEMINI EXTRACTION
-# =========================================================
+def score_output_quality(image: Image.Image) -> Tuple[bool, str]:
+    """
+    Strong output quality gate.
+    Rejects noisy fallback results before showing/download buttons.
+    """
+    if not HAS_NUMPY:
+        return True, "Output quality check skipped."
+
+    img = image.convert("RGBA")
+    arr = np.array(img, dtype=np.uint8)
+    alpha = arr[:, :, 3]
+    mask = alpha > 0
+
+    visible_pixels = int(mask.sum())
+    total = image.width * image.height
+
+    if visible_pixels < 80:
+        return False, "Too little signature ink was detected."
+
+    fill_ratio = visible_pixels / max(1, total)
+
+    if fill_ratio > 0.35:
+        return False, (
+            "The output contains too much dark content and looks like noise or a shadow, "
+            "not a clean signature."
+        )
+
+    components = connected_components(mask)
+    useful_components = [c for c in components if len(c) >= 8]
+
+    if len(useful_components) > 15:
+        return False, (
+            "The output contains too many disconnected ink fragments. "
+            "This usually means the photo has shadows, paper texture, or dark objects."
+        )
+
+    largest = max(useful_components, key=len) if useful_components else []
+    largest_ratio = len(largest) / max(1, visible_pixels)
+
+    if largest_ratio < 0.45:
+        return False, (
+            "The detected ink is scattered instead of forming one clear signature. "
+            "Please retake the photo closer to the signature."
+        )
+
+    if image.width > 900 or image.height > 350:
+        return False, "The output is too large and may include background artifacts."
+
+    return True, "Output quality passed."
+
 
 def ask_gemini_extract_signature_only(
     cropped_image: Image.Image,
@@ -628,10 +633,6 @@ The result should look like a cropped signature PNG, not a photo of paper.
     raise RuntimeError("Gemini did not return an image.")
 
 
-# =========================================================
-# LOCAL FALLBACK
-# =========================================================
-
 def local_signature_cutout(image: Image.Image, threshold: int = 150) -> Image.Image:
     image = image.convert("RGBA")
 
@@ -655,18 +656,7 @@ def local_signature_cutout(image: Image.Image, threshold: int = 150) -> Image.Im
 
         return finalize_signature_only(Image.fromarray(arr, mode="RGBA"))
 
-    new_data = []
-
-    for r, g, b, a in image.getdata():
-        gray = 0.299 * r + 0.587 * g + 0.114 * b
-
-        if gray < threshold:
-            new_data.append((0, 0, 0, 255))
-        else:
-            new_data.append((255, 255, 255, 0))
-
-    image.putdata(new_data)
-    return finalize_signature_only(image)
+    return image
 
 
 def process_signature_only(
@@ -676,9 +666,15 @@ def process_signature_only(
     crop_padding: int,
     alpha_threshold: int,
     alpha_softness: int,
-) -> Tuple[Image.Image, str, str]:
+) -> Tuple[Image.Image | None, str, str]:
     image = fix_image_orientation(image)
     image = smart_resize_for_processing(image, max_pixels=2400)
+
+    valid, validation_message = validate_upload_quality(image)
+    st.session_state.validation_status = validation_message
+
+    if not valid:
+        return None, "Rejected", validation_message
 
     crop = detect_signature_bbox(
         image=image,
@@ -702,20 +698,30 @@ def process_signature_only(
             )
 
             final = finalize_signature_only(transparent)
+            ok, reason = score_output_quality(final)
 
-            return final, "Gemini", "Signature extracted from safe crop."
+            if ok:
+                return final, "Gemini", "Signature extracted successfully."
+
+            return None, "Rejected", reason
 
         except Exception as e:
             fallback = local_signature_cutout(crop_for_gemini, threshold=150)
-            return fallback, "Local fallback", f"Gemini failed: {e}"
+            ok, reason = score_output_quality(fallback)
+
+            if ok:
+                return fallback, "Local fallback", f"Gemini failed: {e}"
+
+            return None, "Rejected", reason
 
     fallback = local_signature_cutout(crop_for_gemini, threshold=150)
-    return fallback, "Local fallback", "Gemini disabled or session limit reached."
+    ok, reason = score_output_quality(fallback)
 
+    if ok:
+        return fallback, "Local fallback", "Gemini disabled or session limit reached."
 
-# =========================================================
-# DOWNLOADS
-# =========================================================
+    return None, "Rejected", reason
+
 
 def png_bytes_with_metadata(img: Image.Image) -> bytes:
     meta = PngImagePlugin.PngInfo()
@@ -798,10 +804,6 @@ def docx_download_link(docx_bytes: bytes, filename: str, label: str) -> str:
     """
 
 
-# =========================================================
-# PREVIEW PROTECTION
-# =========================================================
-
 def add_preview_protection(
     image: Image.Image,
     text: str = "PREVIEW • PAY TO UNLOCK",
@@ -845,23 +847,27 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
     return image if paid else add_preview_protection(image)
 
 
-# =========================================================
-# UI
-# =========================================================
-
 st.markdown(f"""
 <div class="hero">
     <h1>🖊️ {CONFIG.app_name}</h1>
     <p>
-        Upload a JPEG, PNG, or WebP signature photo. The app safely ignores large dark shadows
-        and extracts only the signature as a transparent PNG.
+        Upload a signature photo and download a clean transparent PNG signature.
+        The app checks image quality before processing to avoid bad outputs.
     </p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("""
-<div class="tip-box">
-<strong>Tip:</strong> JPEG is supported. For best results, keep the signature close, avoid shadows, and avoid large dark objects in the frame.
+<div class="guide-box">
+<h3>📸 Upload Guide</h3>
+<ul>
+<li>Sign on clean white paper.</li>
+<li>Use a dark black or blue pen.</li>
+<li>Take the photo close to the signature.</li>
+<li>Keep only the signature and paper in the frame.</li>
+<li>Avoid shadows, laptops, phones, tables, or dark objects in the photo.</li>
+<li>Make sure the signature is not too faint.</li>
+</ul>
 </div>
 """, unsafe_allow_html=True)
 
@@ -889,6 +895,8 @@ if uploaded_file:
     original = Image.open(uploaded_file)
     original = fix_image_orientation(original)
 
+    st.image(original, caption="Uploaded photo", use_container_width=True)
+
     with st.expander("Processing settings", expanded=False):
         model_name = st.text_input("Gemini model", value=CONFIG.gemini_model)
         darkness_threshold = st.slider("Ink detection threshold", 100, 220, 170, 2)
@@ -900,7 +908,7 @@ if uploaded_file:
         start = time.time()
 
         try:
-            with st.spinner("Extracting signature only..."):
+            with st.spinner("Checking photo and extracting signature..."):
                 final_img, method, reason = process_signature_only(
                     image=original,
                     model_name=model_name,
@@ -910,17 +918,31 @@ if uploaded_file:
                     alpha_softness=alpha_softness,
                 )
 
+            elapsed = time.time() - start
+
+            if final_img is None or method == "Rejected":
+                st.session_state.final_clean_rgba = None
+                st.session_state.method_used = "Rejected"
+                st.session_state.quality_reason = reason
+
+                st.error(reason)
+                st.warning(
+                    "Please retake the photo closer to the signature, with brighter lighting, "
+                    "white paper only, darker ink, and no dark objects or shadows."
+                )
+            else:
                 st.session_state.final_clean_rgba = final_img
                 st.session_state.method_used = method
                 st.session_state.quality_reason = reason
-
-            elapsed = time.time() - start
-            st.success(f"Done in {elapsed:.2f} seconds.")
+                st.success(f"Done in {elapsed:.2f} seconds.")
 
         except Exception as e:
+            st.session_state.final_clean_rgba = None
+            st.session_state.method_used = "Rejected"
+            st.session_state.quality_reason = str(e)
             st.error(f"Processing failed: {e}")
 
-if st.session_state.final_clean_rgba is not None:
+if st.session_state.final_clean_rgba is not None and st.session_state.method_used != "Rejected":
     st.markdown("---")
 
     st.info(
@@ -975,7 +997,39 @@ if st.session_state.final_clean_rgba is not None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("---")
+
+st.markdown("""
+<div class="guide-box">
+<h3>📝 How to Use Your Digital PNG Signature</h3>
+
+<b>In Microsoft Word:</b>
+<ol>
+<li>Open your document.</li>
+<li>Go to <b>Insert → Pictures</b>.</li>
+<li>Select the downloaded transparent PNG.</li>
+<li>Click the image, then choose <b>Layout Options → In Front of Text</b>.</li>
+<li>Resize from the corner handles only.</li>
+</ol>
+
+<b>In Google Docs:</b>
+<ol>
+<li>Go to <b>Insert → Image → Upload from computer</b>.</li>
+<li>Select the PNG.</li>
+<li>Click the image and choose <b>In front of text</b>.</li>
+</ol>
+
+<b>In PDF editors:</b>
+<ol>
+<li>Use <b>Add Image</b>, <b>Stamp</b>, or <b>Fill & Sign</b>.</li>
+<li>Select the transparent PNG.</li>
+<li>Place it above the signature line.</li>
+</ol>
+
+<p><b>Important:</b> This PNG is a visual signature image, not a certificate-based digital signature.</p>
+</div>
+""", unsafe_allow_html=True)
+
 st.markdown(
-    '<div class="footer-note">Signature-only transparent PNG extractor with safer JPEG crop detection</div>',
+    '<div class="footer-note">Signature-only transparent PNG extractor with upload guide and usage instructions</div>',
     unsafe_allow_html=True,
 )

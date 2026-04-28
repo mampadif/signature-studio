@@ -52,6 +52,13 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
+# Conditional import for Google GenAI
+try:
+    from google import genai
+    HAS_GENAI = True
+except ImportError:
+    HAS_GENAI = False
+
 
 # =========================================================
 # CONFIG
@@ -165,7 +172,16 @@ def create_card_checkout_url() -> str | None:
 
         return session.url
 
-    except Exception:
+    except stripe.error.AuthenticationError:
+        st.error("❌ Stripe Authentication Error: Invalid Secret Key. Use the key that starts with 'sk_' (not 'pk_').")
+        return None
+    except stripe.error.InvalidRequestError as e:
+        st.error("❌ Stripe Invalid Request Error: " + str(e))
+        if "No such price" in str(e):
+            st.error("💡 The Price ID is invalid or from a different mode (test/live). Make sure your API key and Price ID match.")
+        return None
+    except Exception as e:
+        st.error("❌ Stripe Error: " + str(e))
         return None
 
 
@@ -302,12 +318,10 @@ def get_ai_client():
     if st.session_state.ai_calls_used >= CONFIG.max_ai_calls_per_session:
         raise RuntimeError("Enhanced cleanup session limit reached.")
 
-    try:
-        from google import genai
-    except ImportError as e:
+    if not HAS_GENAI:
         raise RuntimeError(
             "google-genai package missing. Add 'google-genai>=1.0.0' to requirements.txt."
-        ) from e
+        )
 
     return genai.Client(api_key=CONFIG.api_key)
 
@@ -871,7 +885,7 @@ def process_signature_only(
 
     crop_for_processing = enhance_crop_before_ai(crop, min_width=1200)
 
-    if CONFIG.api_key and st.session_state.ai_calls_used < CONFIG.max_ai_calls_per_session:
+    if CONFIG.api_key and st.session_state.ai_calls_used < CONFIG.max_ai_calls_per_session and HAS_GENAI:
         try:
             cleaned_white = ask_ai_extract_signature_only(
                 cropped_image=crop_for_processing,
@@ -897,7 +911,7 @@ def process_signature_only(
             ok, reason = score_output_quality(fallback)
 
             if ok:
-                return fallback, "Standard cleanup", "Enhanced cleanup unavailable: " + str(e)
+                return fallback, "Standard cleanup", f"Enhanced cleanup unavailable: {e}"
 
             return None, "Rejected", reason
 
@@ -1019,56 +1033,29 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 
 def payment_cta() -> None:
     checkout_url = create_card_checkout_url()
-    
-    # Debug information - shows why card payment might not be available
-    if not checkout_url:
-        debug_messages = []
-        debug_messages.append("Debug: Card payment not available. Reasons:")
-        if not STRIPE_AVAILABLE:
-            debug_messages.append("- Stripe package not installed. Add 'stripe' to requirements.txt")
-        if not CONFIG.stripe_secret_key:
-            debug_messages.append("- STRIPE_SECRET_KEY is empty in Streamlit secrets")
-        if not CONFIG.stripe_price_id_signature:
-            debug_messages.append("- STRIPE_PRICE_ID_SIGNATURE is empty in Streamlit secrets")
-        if not CONFIG.app_url:
-            debug_messages.append("- APP_URL is empty in Streamlit secrets")
-        if STRIPE_AVAILABLE and CONFIG.stripe_secret_key and CONFIG.stripe_price_id_signature and CONFIG.app_url:
-            debug_messages.append("- Stripe session creation failed. Check your API keys and Price ID are valid")
-        
-        for msg in debug_messages:
-            st.info(msg)
-    
-    # Open payment card container
+
     st.markdown('<div class="payment-card">', unsafe_allow_html=True)
-    
-    # Heading
     st.markdown('<h3>🔓 Unlock clean signature files</h3>', unsafe_allow_html=True)
-    
-    # Description
     st.markdown(
-        '<p>Your preview is watermarked. Pay <strong>' + CONFIG.price_display + 
+        '<p>Your preview is watermarked. Pay <strong>' + CONFIG.price_display +
         '</strong> once to download the clean transparent PNG and Word-ready signature file.</p>',
         unsafe_allow_html=True
     )
-    
-    # Check what payment methods are available
+
     has_card = checkout_url is not None
     has_paypal_url = bool(CONFIG.paypal_payment_url)
     has_paypal_email = bool(CONFIG.paypal_email)
-    
+
     if has_card or has_paypal_url or has_paypal_email:
-        # Open payment options container
         st.markdown('<div class="payment-options">', unsafe_allow_html=True)
-        
-        # Card payment button (Stripe)
+
         if has_card:
             card_html = (
                 '<a class="payment-btn" href="' + checkout_url + '" target="_self">'
                 '💳 Pay with Card — ' + CONFIG.price_display + '</a>'
             )
             st.markdown(card_html, unsafe_allow_html=True)
-        
-        # PayPal payment button
+
         if has_paypal_url:
             paypal_html = (
                 '<a class="paypal-btn" href="' + CONFIG.paypal_payment_url + '" target="_blank">'
@@ -1077,33 +1064,27 @@ def payment_cta() -> None:
             st.markdown(paypal_html, unsafe_allow_html=True)
         elif has_paypal_email:
             paypal_html = (
-                '<div class="payment-secondary">Pay with PayPal to <strong>' + 
+                '<div class="payment-secondary">Pay with PayPal to <strong>' +
                 CONFIG.paypal_email + '</strong>, then enter your unlock code.</div>'
             )
             st.markdown(paypal_html, unsafe_allow_html=True)
-        
-        # Close payment options container
+
         st.markdown('</div>', unsafe_allow_html=True)
     else:
-        # No payment methods configured at all
         st.markdown(
             '<div class="payment-options">'
-            '<div class="payment-secondary">No payment methods configured. '
+            '<div class="payment-secondary">Payment options are not configured yet. '
             'Please set up Stripe or PayPal in Streamlit Cloud secrets.</div>'
             '</div>',
             unsafe_allow_html=True
         )
-    
-    # Footer note
+
     st.markdown(
         '<div class="payment-secondary">Choose your preferred payment method. Downloads unlock after payment.</div>',
         unsafe_allow_html=True
     )
-    
-    # Close payment card container
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Unlock code section
     if CONFIG.unlock_code:
         with st.expander("Already paid? Enter unlock code"):
             code = st.text_input("Unlock code", type="password")

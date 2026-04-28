@@ -920,7 +920,7 @@ def pil_png_download_link(img: Image.Image, filename: str, label: str) -> str:
     png_bytes = png_bytes_with_metadata(img)
     b64 = base64.b64encode(png_bytes).decode()
 
-    return f"""<a href="data:image/png;base64,{b64}" download="{filename}" style="display:inline-block;text-decoration:none;background:linear-gradient(90deg,#111827 0%, #374151 100%);color:white;padding:0.75rem 1rem;border-radius:999px;font-weight:700;font-size:0.95rem;margin:0.25rem;">{label}</a>"""
+    return '<a href="data:image/png;base64,' + b64 + '" download="' + filename + '" style="display:inline-block;text-decoration:none;background:linear-gradient(90deg,#111827 0%, #374151 100%);color:white;padding:0.75rem 1rem;border-radius:999px;font-weight:700;font-size:0.95rem;margin:0.25rem;">' + label + '</a>'
 
 
 def create_word_ready_docx(signature_img: Image.Image) -> bytes:
@@ -951,7 +951,7 @@ def create_word_ready_docx(signature_img: Image.Image) -> bytes:
 def docx_download_link(docx_bytes: bytes, filename: str, label: str) -> str:
     b64 = base64.b64encode(docx_bytes).decode()
 
-    return f"""<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{filename}" style="display:inline-block;text-decoration:none;background:linear-gradient(90deg,#2563EB 0%, #1D4ED8 100%);color:white;padding:0.75rem 1rem;border-radius:999px;font-weight:700;font-size:0.95rem;margin:0.25rem;">{label}</a>"""
+    return '<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,' + b64 + '" download="' + filename + '" style="display:inline-block;text-decoration:none;background:linear-gradient(90deg,#2563EB 0%, #1D4ED8 100%);color:white;padding:0.75rem 1rem;border-radius:999px;font-weight:700;font-size:0.95rem;margin:0.25rem;">' + label + '</a>'
 
 
 # =========================================================
@@ -1008,55 +1008,37 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 
 def payment_cta() -> None:
     checkout_url = create_card_checkout_url()
-
-    # Card button
-    card_button = ""
-    if checkout_url:
-        card_button = f"""\
-<a class="payment-btn" href="{checkout_url}" target="_self">
-    💳 Pay with Card — {CONFIG.price_display}
-</a>"""
-
-    # PayPal button
-    paypal_button = ""
-    if CONFIG.paypal_payment_url:
-        paypal_button = f"""\
-<a class="paypal-btn" href="{CONFIG.paypal_payment_url}" target="_blank">
-    Pay with PayPal — {CONFIG.price_display}
-</a>"""
-    elif CONFIG.paypal_email:
-        paypal_button = f"""\
-<div class="payment-secondary">
-    Pay with PayPal to <strong>{CONFIG.paypal_email}</strong>, then enter your unlock code.
-</div>"""
-
-    # Payment options wrapper
-    if card_button or paypal_button:
-        payment_options = f"""\
-<div class="payment-options">
-    {card_button}
-    {paypal_button}
-</div>"""
+    
+    # Build HTML using list and join - NO multi-line strings, NO backslash continuations
+    lines = []
+    lines.append('<div class="payment-card">')
+    lines.append('<h3>🔓 Unlock clean signature files</h3>')
+    lines.append('<p>Your preview is watermarked. Pay <strong>' + CONFIG.price_display + '</strong> once to download the clean transparent PNG and Word-ready signature file.</p>')
+    
+    has_buttons = False
+    
+    if checkout_url or CONFIG.paypal_payment_url or CONFIG.paypal_email:
+        lines.append('<div class="payment-options">')
+        has_buttons = True
+        
+        if checkout_url:
+            lines.append('<a class="payment-btn" href="' + checkout_url + '" target="_self">💳 Pay with Card — ' + CONFIG.price_display + '</a>')
+        
+        if CONFIG.paypal_payment_url:
+            lines.append('<a class="paypal-btn" href="' + CONFIG.paypal_payment_url + '" target="_blank">Pay with PayPal — ' + CONFIG.price_display + '</a>')
+        elif CONFIG.paypal_email:
+            lines.append('<div class="payment-secondary">Pay with PayPal to <strong>' + CONFIG.paypal_email + '</strong>, then enter your unlock code.</div>')
+        
+        lines.append('</div>')
     else:
-        payment_options = """\
-<div class="payment-secondary">
-    Payment options are not configured yet.
-</div>"""
-
-    # Final HTML card - ZERO INDENTATION STRINGS
-    html = f"""\
-<div class="payment-card">
-    <h3>🔓 Unlock clean signature files</h3>
-    <p>
-        Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
-        to download the clean transparent PNG and Word-ready signature file.
-    </p>
-    {payment_options}
-    <div class="payment-secondary">
-        Choose your preferred payment method. Downloads unlock after payment.
-    </div>
-</div>"""
-
+        lines.append('<div class="payment-secondary">Payment options are not configured yet.</div>')
+    
+    lines.append('<div class="payment-secondary">Choose your preferred payment method. Downloads unlock after payment.</div>')
+    lines.append('</div>')
+    
+    # Join all lines with empty string - no spaces, no newlines
+    html = ''.join(lines)
+    
     st.markdown(html, unsafe_allow_html=True)
 
     if CONFIG.unlock_code:
@@ -1075,28 +1057,15 @@ def payment_cta() -> None:
 # UI
 # =========================================================
 
-st.markdown(f"""
-<div class="hero">
-    <h1>🖊️ {CONFIG.app_name}</h1>
-    <p>
-        Upload a signature photo, preview the result for free, then unlock clean downloads for {CONFIG.price_display}.
-    </p>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    '<div class="hero"><h1>🖊️ ' + CONFIG.app_name + '</h1><p>Upload a signature photo, preview the result for free, then unlock clean downloads for ' + CONFIG.price_display + '.</p></div>',
+    unsafe_allow_html=True
+)
 
-st.markdown("""
-<div class="guide-box">
-<h3>📸 Upload Guide</h3>
-<ul>
-<li>Sign on clean white paper.</li>
-<li>Use a dark black or blue pen.</li>
-<li>Take the photo close to the signature.</li>
-<li>Keep only the signature and paper in the frame.</li>
-<li>Avoid shadows, laptops, phones, tables, or dark objects in the photo.</li>
-<li>Make sure the signature is not too faint.</li>
-</ul>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    '<div class="guide-box"><h3>📸 Upload Guide</h3><ul><li>Sign on clean white paper.</li><li>Use a dark black or blue pen.</li><li>Take the photo close to the signature.</li><li>Keep only the signature and paper in the frame.</li><li>Avoid shadows, laptops, phones, tables, or dark objects in the photo.</li><li>Make sure the signature is not too faint.</li></ul></div>',
+    unsafe_allow_html=True
+)
 
 left, right = st.columns([1, 1])
 
@@ -1217,36 +1186,10 @@ if st.session_state.final_clean_rgba is not None and st.session_state.method_use
 
 st.markdown("---")
 
-st.markdown("""
-<div class="guide-box">
-<h3>📝 How to Use Your Digital PNG Signature</h3>
-
-<b>In Microsoft Word:</b>
-<ol>
-<li>Open your document.</li>
-<li>Go to <b>Insert → Pictures</b>.</li>
-<li>Select the downloaded transparent PNG.</li>
-<li>Click the image, then choose <b>Layout Options → In Front of Text</b>.</li>
-<li>Resize from the corner handles only.</li>
-</ol>
-
-<b>In Google Docs:</b>
-<ol>
-<li>Go to <b>Insert → Image → Upload from computer</b>.</li>
-<li>Select the PNG.</li>
-<li>Click the image and choose <b>In front of text</b>.</li>
-</ol>
-
-<b>In PDF editors:</b>
-<ol>
-<li>Use <b>Add Image</b>, <b>Stamp</b>, or <b>Fill & Sign</b>.</li>
-<li>Select the transparent PNG.</li>
-<li>Place it above the signature line.</li>
-</ol>
-
-<p><b>Important:</b> This PNG is a visual signature image, not a certificate-based digital signature.</p>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    '<div class="guide-box"><h3>📝 How to Use Your Digital PNG Signature</h3><b>In Microsoft Word:</b><ol><li>Open your document.</li><li>Go to <b>Insert → Pictures</b>.</li><li>Select the downloaded transparent PNG.</li><li>Click the image, then choose <b>Layout Options → In Front of Text</b>.</li><li>Resize from the corner handles only.</li></ol><b>In Google Docs:</b><ol><li>Go to <b>Insert → Image → Upload from computer</b>.</li><li>Select the PNG.</li><li>Click the image and choose <b>In front of text</b>.</li></ol><b>In PDF editors:</b><ol><li>Use <b>Add Image</b>, <b>Stamp</b>, or <b>Fill & Sign</b>.</li><li>Select the transparent PNG.</li><li>Place it above the signature line.</li></ol><p><b>Important:</b> This PNG is a visual signature image, not a certificate-based digital signature.</p></div>',
+    unsafe_allow_html=True
+)
 
 st.markdown(
     '<div class="footer-note">Signature-only transparent PNG extractor with card and PayPal unlock options</div>',

@@ -1,16 +1,6 @@
 """
 Signature Studio Pro
-Complete version:
-- Small uploaded-image preview inside expander
-- Upload guide
-- JPEG/PNG/WebP support
-- Upload quality validation
-- Gemini-first extraction
-- Local fallback
-- Rejects noisy/bad outputs
-- Transparent PNG download
-- Word-ready DOCX download
-- Usage guide
+Complete version with payment CTA and stronger unpaid watermark.
 
 requirements.txt:
 streamlit
@@ -25,6 +15,7 @@ GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
 GEMINI_ENABLED = true
 MAX_GEMINI_CALLS_PER_SESSION = 3
+PAYMENT_URL = "https://your-payment-link-here"
 """
 
 from __future__ import annotations
@@ -63,22 +54,12 @@ class AppConfig:
     app_name: str
     gemini_enabled: bool
     max_calls_per_session: int
+    payment_url: str
 
 
 def load_config() -> AppConfig:
     if "GEMINI_API_KEY" not in st.secrets:
-        raise RuntimeError(
-            """
-Missing GEMINI_API_KEY in Streamlit Secrets.
-
-Add:
-GEMINI_API_KEY = "your_key_here"
-GEMINI_MODEL = "gemini-3.1-flash-image-preview"
-APP_NAME = "Signature Studio Pro"
-GEMINI_ENABLED = true
-MAX_GEMINI_CALLS_PER_SESSION = 3
-"""
-        )
+        raise RuntimeError("Missing GEMINI_API_KEY in Streamlit Secrets.")
 
     return AppConfig(
         gemini_api_key=st.secrets["GEMINI_API_KEY"],
@@ -86,6 +67,7 @@ MAX_GEMINI_CALLS_PER_SESSION = 3
         app_name=st.secrets.get("APP_NAME", "Signature Studio Pro"),
         gemini_enabled=bool(st.secrets.get("GEMINI_ENABLED", True)),
         max_calls_per_session=int(st.secrets.get("MAX_GEMINI_CALLS_PER_SESSION", 3)),
+        payment_url=st.secrets.get("PAYMENT_URL", "#"),
     )
 
 
@@ -163,6 +145,39 @@ st.markdown("""
     box-shadow: 0 10px 28px rgba(16,24,40,0.06);
     text-align: center;
 }
+.payment-card {
+    margin-top: 1.25rem;
+    padding: 1.25rem;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #fff7ed 0%, #fffbeb 100%);
+    border: 1px solid #fed7aa;
+    box-shadow: 0 10px 26px rgba(154,52,18,0.08);
+    text-align: left;
+}
+.payment-card h3 {
+    color: #9a3412;
+    margin: 0 0 0.45rem 0;
+}
+.payment-card p {
+    color: #7c2d12;
+    margin: 0 0 1rem 0;
+    line-height: 1.55;
+}
+.payment-btn {
+    display:inline-block;
+    background: linear-gradient(90deg,#111827 0%, #374151 100%);
+    color:white !important;
+    padding:0.8rem 1.1rem;
+    border-radius:999px;
+    text-decoration:none !important;
+    font-weight:800;
+    font-size:0.98rem;
+}
+.payment-secondary {
+    color:#9a3412;
+    font-size:0.9rem;
+    margin-top:0.8rem;
+}
 .footer-note {
     text-align: center;
     color: #667085;
@@ -201,6 +216,19 @@ def increment_gemini_usage() -> None:
 # =========================================================
 # IMAGE HELPERS
 # =========================================================
+
+def ensure_pil_image(obj) -> Image.Image:
+    """
+    Converts Gemini/image outputs safely to PIL Image.
+    """
+    if isinstance(obj, Image.Image):
+        return obj.convert("RGBA")
+
+    if hasattr(obj, "convert"):
+        return obj.convert("RGBA")
+
+    raise TypeError(f"Unsupported image object returned: {type(obj)}")
+
 
 def fix_image_orientation(image: Image.Image) -> Image.Image:
     try:
@@ -426,7 +454,7 @@ def white_to_transparent_soft(
     threshold: int = 248,
     softness: int = 18,
 ) -> Image.Image:
-    image = image.convert("RGBA")
+    image = ensure_pil_image(image)
     soft_start = max(0, threshold - softness)
 
     if HAS_NUMPY:
@@ -564,7 +592,7 @@ def resize_signature_only(
 
 
 def finalize_signature_only(image: Image.Image) -> Image.Image:
-    image = image.convert("RGBA")
+    image = ensure_pil_image(image)
 
     image = remove_small_noise(image, alpha_cutoff=25)
     image = keep_signature_cluster_only(image, min_area=20, margin=45)
@@ -669,7 +697,7 @@ The result should look like a cropped signature PNG, not a photo of paper.
     if parts:
         for part in parts:
             if getattr(part, "inline_data", None) is not None:
-                return part.as_image().convert("RGBA")
+                return ensure_pil_image(part.as_image())
 
     candidates = getattr(response, "candidates", None)
 
@@ -679,7 +707,7 @@ The result should look like a cropped signature PNG, not a photo of paper.
             if content and getattr(content, "parts", None):
                 for part in content.parts:
                     if getattr(part, "inline_data", None) is not None:
-                        return part.as_image().convert("RGBA")
+                        return ensure_pil_image(part.as_image())
 
     raise RuntimeError("Gemini did not return an image.")
 
@@ -864,22 +892,23 @@ def docx_download_link(docx_bytes: bytes, filename: str, label: str) -> str:
 
 
 # =========================================================
-# PREVIEW PROTECTION
+# PREVIEW PROTECTION + PAYMENT
 # =========================================================
 
 def add_preview_protection(
     image: Image.Image,
-    text: str = "PREVIEW • PAY TO UNLOCK",
-    opacity: int = 80,
-    spacing: int = 120,
-    angle: float = -30,
+    text: str = "PREVIEW • UNLOCK CLEAN PNG",
+    opacity: int = 95,
+    spacing: int = 90,
+    angle: float = -28,
 ) -> Image.Image:
     img = image.convert("RGBA").copy()
+
     overlay = Image.new("RGBA", img.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
 
     try:
-        font_size = max(16, img.width // 14)
+        font_size = max(14, img.width // 18)
         font = ImageFont.truetype("arial.ttf", font_size)
     except Exception:
         font = ImageFont.load_default()
@@ -890,8 +919,9 @@ def add_preview_protection(
 
     tile = Image.new("RGBA", (tw + spacing, th + spacing), (255, 255, 255, 0))
     tile_draw = ImageDraw.Draw(tile)
+
     tile_draw.text(
-        (spacing // 3, spacing // 3),
+        (spacing // 4, spacing // 4),
         text,
         fill=(90, 90, 90, opacity),
         font=font,
@@ -899,15 +929,40 @@ def add_preview_protection(
 
     rotated = tile.rotate(angle, expand=True)
 
-    for y in range(-rotated.height, img.height + rotated.height, rotated.height):
-        for x in range(-rotated.width, img.width + rotated.width, rotated.width):
+    step_y = max(1, rotated.height // 2)
+    step_x = max(1, rotated.width // 2)
+
+    for y in range(-rotated.height, img.height + rotated.height, step_y):
+        for x in range(-rotated.width, img.width + rotated.width, step_x):
             overlay.alpha_composite(rotated, (x, y))
 
-    return Image.alpha_composite(img, overlay)
+    protected = Image.alpha_composite(img, overlay)
+    return protected
 
 
 def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
     return image if paid else add_preview_protection(image)
+
+
+def payment_cta() -> None:
+    st.markdown(
+        f"""
+        <div class="payment-card">
+            <h3>🔓 Unlock clean signature files</h3>
+            <p>
+                Your preview is watermarked. Unlock to download the clean transparent PNG
+                and the Word-ready signature file.
+            </p>
+            <a class="payment-btn" href="{CONFIG.payment_url}" target="_blank">
+                🔓 Unlock & Download
+            </a>
+            <div class="payment-secondary">
+                Includes transparent PNG + Word-ready signature document.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # =========================================================
@@ -1062,10 +1117,8 @@ if st.session_state.final_clean_rgba is not None and st.session_state.method_use
             )
         else:
             st.warning("Install python-docx to enable Word-ready download.")
-
     else:
-        st.warning("Unlock to download the clean transparent PNG and Word-ready file.")
-        st.caption("Preview is watermarked to discourage screenshot reuse.")
+        payment_cta()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1103,6 +1156,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown(
-    '<div class="footer-note">Signature-only transparent PNG extractor with upload guide and usage instructions</div>',
+    '<div class="footer-note">Signature-only transparent PNG extractor with payment unlock flow</div>',
     unsafe_allow_html=True,
 )

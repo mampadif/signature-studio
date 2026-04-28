@@ -9,13 +9,14 @@ google-genai>=1.0.0
 python-docx
 stripe
 
-Streamlit secrets:
+Streamlit Cloud secrets:
 GEMINI_API_KEY = ""
 GEMINI_MODEL = "gemini-3.1-flash-image-preview"
 APP_NAME = "Signature Studio Pro"
 STRIPE_SECRET_KEY = ""
 STRIPE_PRICE_ID_SIGNATURE = ""
 PAYPAL_EMAIL = "mampadif@gmail.com"
+PAYPAL_PAYMENT_URL = "https://www.paypal.com/paypalme/YOURNAME/3.99"
 APP_URL = "https://signature-studio.streamlit.app/"
 UNLOCK_CODE = ""
 PRICE_DISPLAY = "$3.99"
@@ -26,7 +27,6 @@ from __future__ import annotations
 
 import base64
 import io
-import time
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -66,6 +66,7 @@ class AppConfig:
     stripe_secret_key: str
     stripe_price_id_signature: str
     paypal_email: str
+    paypal_payment_url: str
     app_url: str
     unlock_code: str
     price_display: str
@@ -80,6 +81,7 @@ def load_config() -> AppConfig:
         stripe_secret_key=st.secrets.get("STRIPE_SECRET_KEY", ""),
         stripe_price_id_signature=st.secrets.get("STRIPE_PRICE_ID_SIGNATURE", ""),
         paypal_email=st.secrets.get("PAYPAL_EMAIL", ""),
+        paypal_payment_url=st.secrets.get("PAYPAL_PAYMENT_URL", ""),
         app_url=st.secrets.get("APP_URL", ""),
         unlock_code=st.secrets.get("UNLOCK_CODE", ""),
         price_display=st.secrets.get("PRICE_DISPLAY", "$3.99"),
@@ -235,9 +237,25 @@ st.markdown("""
     margin: 0 0 1rem 0;
     line-height: 1.55;
 }
+.payment-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1rem;
+}
 .payment-btn {
     display:inline-block;
     background: linear-gradient(90deg,#111827 0%, #374151 100%);
+    color:white !important;
+    padding:0.85rem 1.15rem;
+    border-radius:999px;
+    text-decoration:none !important;
+    font-weight:800;
+    font-size:0.98rem;
+}
+.paypal-btn {
+    display:inline-block;
+    background: linear-gradient(90deg,#0070ba 0%, #003087 100%);
     color:white !important;
     padding:0.85rem 1.15rem;
     border-radius:999px;
@@ -266,10 +284,10 @@ st.markdown("""
 
 def get_ai_client():
     if not CONFIG.api_key:
-        raise RuntimeError("AI cleanup is not configured.")
+        raise RuntimeError("Enhanced cleanup is not configured.")
 
     if st.session_state.ai_calls_used >= CONFIG.max_ai_calls_per_session:
-        raise RuntimeError("AI cleanup session limit reached.")
+        raise RuntimeError("Enhanced cleanup session limit reached.")
 
     try:
         from google import genai
@@ -572,7 +590,11 @@ def remove_small_noise(image: Image.Image, alpha_cutoff: int = 25) -> Image.Imag
     return image
 
 
-def keep_signature_cluster_only(image: Image.Image, min_area: int = 20, margin: int = 45) -> Image.Image:
+def keep_signature_cluster_only(
+    image: Image.Image,
+    min_area: int = 20,
+    margin: int = 45,
+) -> Image.Image:
     image = image.convert("RGBA")
 
     if not HAS_NUMPY:
@@ -728,7 +750,7 @@ def score_output_quality(image: Image.Image) -> Tuple[bool, str]:
 
 
 # =========================================================
-# AI EXTRACTION
+# ENHANCED EXTRACTION
 # =========================================================
 
 def ask_ai_extract_signature_only(
@@ -778,7 +800,7 @@ The result should look like a cropped signature PNG, not a photo of paper.
                     if getattr(part, "inline_data", None) is not None:
                         return ensure_pil_image(part.as_image())
 
-    raise RuntimeError("AI cleanup did not return an image.")
+    raise RuntimeError("Enhanced cleanup did not return an image.")
 
 
 # =========================================================
@@ -881,7 +903,10 @@ def process_signature_only(
 
 def png_bytes_with_metadata(img: Image.Image) -> bytes:
     meta = PngImagePlugin.PngInfo()
-    meta.add_text("SignatureUse", "Insert as image. In Word/Google Docs, set layout to In Front of Text.")
+    meta.add_text(
+        "SignatureUse",
+        "Insert as image. In Word/Google Docs, set layout to In Front of Text.",
+    )
     meta.add_text("Background", "Transparent PNG")
 
     img = finalize_signature_only(img)
@@ -1015,29 +1040,40 @@ def get_user_visible_preview(image: Image.Image, paid: bool) -> Image.Image:
 def payment_cta() -> None:
     checkout_url = create_stripe_checkout_url()
 
+    stripe_button = ""
     if checkout_url:
-        button_html = f"""
+        stripe_button = f"""
         <a class="payment-btn" href="{checkout_url}" target="_self">
-            🔓 Pay {CONFIG.price_display} & Unlock
+            💳 Pay by Card / Visa — {CONFIG.price_display}
         </a>
+        """
+
+    paypal_button = ""
+    if CONFIG.paypal_payment_url:
+        paypal_button = f"""
+        <a class="paypal-btn" href="{CONFIG.paypal_payment_url}" target="_blank">
+            Pay with PayPal — {CONFIG.price_display}
+        </a>
+        """
+    elif CONFIG.paypal_email:
+        paypal_button = f"""
         <div class="payment-secondary">
-            Secure checkout. Includes transparent PNG + Word-ready signature document.
+            PayPal option: send {CONFIG.price_display} to <strong>{CONFIG.paypal_email}</strong>,
+            then use your unlock code.
+        </div>
+        """
+
+    if not stripe_button and not paypal_button:
+        payment_options = """
+        <div class="payment-secondary">
+            Payment setup is incomplete. Add Stripe or PayPal details in Streamlit secrets.
         </div>
         """
     else:
-        paypal_part = ""
-        if CONFIG.paypal_email:
-            paypal_part = f"""
-            <p>
-                Stripe checkout is not available yet. You can pay via PayPal to:
-                <strong>{CONFIG.paypal_email}</strong>
-            </p>
-            """
-
-        button_html = f"""
-        {paypal_part}
-        <div class="payment-secondary">
-            Payment setup is incomplete. Add STRIPE_SECRET_KEY and STRIPE_PRICE_ID_SIGNATURE in Streamlit secrets.
+        payment_options = f"""
+        <div class="payment-options">
+            {stripe_button}
+            {paypal_button}
         </div>
         """
 
@@ -1049,7 +1085,10 @@ def payment_cta() -> None:
                 Your preview is watermarked. Pay <strong>{CONFIG.price_display}</strong> once
                 to download the clean transparent PNG and Word-ready signature file.
             </p>
-            {button_html}
+            {payment_options}
+            <div class="payment-secondary">
+                Card payments are handled through Stripe. PayPal is available as an alternative.
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1094,16 +1133,12 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-top_left, top_right = st.columns([1, 1])
+left, right = st.columns([1, 1])
 
-with top_left:
-    st.session_state.paid = st.toggle(
-        "Demo: unlocked mode",
-        value=st.session_state.paid,
-        help="For testing only. Replace with real access control before launch.",
-    )
+with left:
+    st.caption("Preview is free. Clean downloads unlock after payment.")
 
-with top_right:
+with right:
     st.caption(
         f"Processing attempts used: {st.session_state.ai_calls_used} / "
         f"{CONFIG.max_ai_calls_per_session}"
@@ -1127,27 +1162,22 @@ if uploaded_file:
         )
 
     with st.expander("Processing settings", expanded=False):
-        model_name = st.text_input("Processing model", value=CONFIG.ai_model)
         darkness_threshold = st.slider("Ink detection threshold", 100, 220, 170, 2)
         crop_padding = st.slider("Crop padding", 5, 100, 35, 5)
         alpha_threshold = st.slider("White removal threshold", 235, 254, 248, 1)
         alpha_softness = st.slider("Edge softness", 6, 35, 18, 1)
 
     if st.button("✨ Create signature preview", type="primary", use_container_width=True):
-        start = time.time()
-
         try:
             with st.spinner("Checking photo and preparing preview..."):
                 final_img, method, reason = process_signature_only(
                     image=original,
-                    model_name=model_name,
+                    model_name=CONFIG.ai_model,
                     darkness_threshold=darkness_threshold,
                     crop_padding=crop_padding,
                     alpha_threshold=alpha_threshold,
                     alpha_softness=alpha_softness,
                 )
-
-            elapsed = time.time() - start
 
             if final_img is None or method == "Rejected":
                 st.session_state.final_clean_rgba = None
@@ -1163,7 +1193,7 @@ if uploaded_file:
                 st.session_state.final_clean_rgba = final_img
                 st.session_state.method_used = method
                 st.session_state.quality_reason = reason
-                st.success(f"Preview ready in {elapsed:.2f} seconds.")
+                st.success("Preview ready.")
 
         except Exception as e:
             st.session_state.final_clean_rgba = None
@@ -1254,6 +1284,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown(
-    '<div class="footer-note">Signature-only transparent PNG extractor with secure unlock flow</div>',
+    '<div class="footer-note">Signature-only transparent PNG extractor with card and PayPal unlock options</div>',
     unsafe_allow_html=True,
 )

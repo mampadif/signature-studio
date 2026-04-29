@@ -46,16 +46,6 @@ class AppConfig:
 
 CONFIG = AppConfig()
 
-C = {
-    "primary": "#6366F1",
-    "dark": "#0F172A",
-    "light": "#F8FAFC",
-    "surface": "#FFFFFF",
-    "border": "#E2E8F0",
-    "muted": "#64748B",
-    "success": "#10B981",
-}
-
 st.set_page_config(page_title=CONFIG.app_name, page_icon="🖊️", layout="wide")
 
 if "paid" not in st.session_state: st.session_state.paid = False
@@ -64,49 +54,59 @@ if "final_clean_rgba" not in st.session_state: st.session_state.final_clean_rgba
 if "method_used" not in st.session_state: st.session_state.method_used = None
 
 # =========================================================
-# 3. COMPACT CSS
+# 3. CLEAN CSS
 # =========================================================
-st.markdown(f"""
+st.markdown("""
 <style>
-    .stApp {{ background: {C["light"]}; }}
-    .compact-header {{
-        background: linear-gradient(135deg, {C["dark"]} 0%, {C["primary"]} 100%);
+    .stApp { background: #F8FAFC; }
+    
+    .compact-header {
+        background: linear-gradient(135deg, #0F172A 0%, #6366F1 100%);
         border-radius: 16px; padding: 1.25rem 2rem; margin-bottom: 1rem;
         display: flex; align-items: center; gap: 1rem;
-    }}
-    .compact-header h1 {{ color: white; font-size: 1.75rem; font-weight: 800; margin: 0; }}
-    .compact-header p {{ color: rgba(255,255,255,0.85); margin: 0; font-size: 0.85rem; }}
-    .logo-icon {{ font-size: 2.5rem; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2)); }}
-    .compact-card {{ background: {C["surface"]}; border: 1px solid {C["border"]}; border-radius: 12px; padding: 1rem; }}
+    }
+    .compact-header h1 { color: white; font-size: 1.75rem; font-weight: 800; margin: 0; }
+    .compact-header p { color: rgba(255,255,255,0.85); margin: 0; font-size: 0.85rem; }
+    .logo-icon { font-size: 2.5rem; }
     
-    /* Clean white preview - looks like paper */
-    .preview-paper {{
-        background: #FFFFFF;
+    .compact-card { background: white; border: 1px solid #E2E8F0; border-radius: 12px; padding: 1.25rem; }
+    
+    /* White preview box with border */
+    .preview-box {
+        background: white;
+        border: 2px solid #E2E8F0;
         border-radius: 12px;
-        border: 1px solid #E2E8F0;
         padding: 2rem;
         text-align: center;
-        min-height: 250px;
+        min-height: 200px;
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-    }}
+    }
     
-    .payment-strip {{
-        background: linear-gradient(90deg, #FFF7ED, #FFFBEB); border: 1px solid #FED7AA;
-        border-radius: 12px; padding: 1rem 1.5rem; display: flex;
-        align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
-    }}
-    .badge {{ display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.2rem 0.65rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }}
-    .badge-warning {{ background: #FEF3C7; color: #92400E; }}
-    .badge-success {{ background: #D1FAE5; color: #065F46; }}
-    .quota-bar {{ display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: {C["muted"]}; }}
-    [data-testid="stSidebar"] {{ background: linear-gradient(180deg, #0F172A, #1E293B); border-right: none; }}
-    [data-testid="stSidebar"] * {{ color: #E2E8F0 !important; }}
-    [data-testid="stFileUploader"] section {{ padding: 1rem !important; }}
-    .block-container {{ padding-top: 1rem; padding-bottom: 1rem; }}
-    .element-container {{ margin-bottom: 0.5rem; }}
+    .payment-strip {
+        background: linear-gradient(90deg, #FFF7ED, #FFFBEB); 
+        border: 1px solid #FED7AA;
+        border-radius: 12px; padding: 1rem 1.5rem; 
+        display: flex; align-items: center; justify-content: space-between; 
+        gap: 1rem; flex-wrap: wrap;
+    }
+    
+    .badge { 
+        display: inline-flex; align-items: center; gap: 0.25rem; 
+        padding: 0.25rem 0.75rem; border-radius: 999px; 
+        font-size: 0.75rem; font-weight: 600; 
+    }
+    .badge-warning { background: #FEF3C7; color: #92400E; }
+    .badge-success { background: #D1FAE5; color: #065F46; }
+    
+    [data-testid="stSidebar"] { 
+        background: linear-gradient(180deg, #0F172A, #1E293B); 
+        border-right: none; 
+    }
+    [data-testid="stSidebar"] * { color: #E2E8F0 !important; }
+    
+    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -129,13 +129,43 @@ def smart_resize_for_processing(image: Image.Image, max_pixels: int = 2400) -> I
     ratio = max_pixels / max(w, h)
     return image.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
 
-def preview_on_white(sig_img: Image.Image) -> Image.Image:
-    """Place the transparent signature on a clean white background so users see it as it would look on paper."""
-    sig_img = sig_img.convert("RGBA")
-    bg = Image.new("RGBA", sig_img.size, (255, 255, 255, 255))
-    out = bg.copy()
-    out.paste(sig_img, (0, 0), sig_img)
-    return out.convert("RGB")
+def signature_on_white_bg(sig_img: Image.Image) -> bytes:
+    """
+    Render the transparent signature on a pure white background
+    and return as PNG bytes for display.
+    """
+    sig = sig_img.convert("RGBA")
+    w, h = sig.size
+    # Create clean white canvas
+    bg = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+    # Paste signature on top
+    bg.paste(sig, (0, 0), sig)
+    # Convert to RGB and save to bytes
+    rgb_img = bg.convert("RGB")
+    buf = io.BytesIO()
+    rgb_img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def add_watermark(img_bytes: bytes, text: str = "PREVIEW") -> bytes:
+    """Add watermark text to PNG bytes and return new PNG bytes."""
+    img = Image.open(io.BytesIO(img_bytes))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", max(16, img.width // 15))
+    except:
+        font = ImageFont.load_default()
+    
+    # Draw repeating watermark
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    
+    for y in range(0, img.height, th + 30):
+        for x in range(0, img.width, tw + 50):
+            draw.text((x, y), text, fill=(200, 200, 200, 180), font=font)
+    
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 # =========================================================
 # 5. TRANSPARENCY PIPELINE
@@ -148,12 +178,12 @@ def white_to_transparent_soft(image: Image.Image, threshold: int = 248, softness
     brightness = arr[:,:,:3].mean(axis=2)
     alpha = np.where(brightness >= threshold, 0,
              np.where(brightness <= soft_start, 255,
-             ((threshold - brightness) / max(1, threshold - soft_start) * 255))).astype(np.uint8)
+             ((threshold - brightness) / max(1, threshold - softness) * 255))).astype(np.uint8)
     arr[:,:,3] = alpha
     ink = alpha > 0
-    arr[ink, 0] = np.minimum(arr[ink, 0], 20)
-    arr[ink, 1] = np.minimum(arr[ink, 1], 20)
-    arr[ink, 2] = np.minimum(arr[ink, 2], 20)
+    arr[ink, 0] = 0
+    arr[ink, 1] = 0
+    arr[ink, 2] = 0
     return Image.fromarray(arr, mode="RGBA")
 
 def remove_small_noise(image: Image.Image, alpha_cutoff: int = 25) -> Image.Image:
@@ -163,9 +193,9 @@ def remove_small_noise(image: Image.Image, alpha_cutoff: int = 25) -> Image.Imag
     alpha[alpha < alpha_cutoff] = 0
     arr[:,:,3] = alpha
     ink = alpha > 0
-    arr[ink, 0] = np.minimum(arr[ink, 0], 20)
-    arr[ink, 1] = np.minimum(arr[ink, 1], 20)
-    arr[ink, 2] = np.minimum(arr[ink, 2], 20)
+    arr[ink, 0] = 0
+    arr[ink, 1] = 0
+    arr[ink, 2] = 0
     return Image.fromarray(arr, mode="RGBA")
 
 def connected_components(mask):
@@ -237,7 +267,7 @@ def finalize_signature_only(image: Image.Image) -> Image.Image:
     return image
 
 # =========================================================
-# 6. AI EXTRACTION
+# 6. PROCESSING
 # =========================================================
 
 def ask_ai_extract_signature_only(cropped_image: Image.Image, model_name: str) -> Image.Image:
@@ -273,14 +303,17 @@ def process_signature(image: Image.Image, a_thresh: int, softness: int) -> Tuple
         except Exception:
             pass
     
-    # Local fallback (always works, no AI needed)
+    # Local fallback
     img = image.convert("RGBA")
     arr = np.array(img, dtype=np.uint8)
     gray = (0.299*arr[:,:,0] + 0.587*arr[:,:,1] + 0.114*arr[:,:,2])
     ink = gray < 170
     arr[:,:,3] = np.where(ink, 255, 0).astype(np.uint8)
-    arr[ink, 0:3] = 0
-    final = finalize_signature_only(Image.fromarray(arr, mode="RGBA"))
+    arr[ink, 0] = 0
+    arr[ink, 1] = 0
+    arr[ink, 2] = 0
+    result = Image.fromarray(arr, mode="RGBA")
+    final = finalize_signature_only(result)
     return final, "Standard"
 
 # =========================================================
@@ -292,7 +325,7 @@ with st.sidebar:
     softness = st.slider("Smoothing", 5, 45, 18)
     st.divider()
     quota = st.session_state.ai_calls_used
-    st.markdown(f'<div class="quota-bar">🖊️ AI calls: <b>{quota}/{CONFIG.max_calls}</b></div>', unsafe_allow_html=True)
+    st.markdown(f'🖊️ AI calls: **{quota}/{CONFIG.max_calls}**')
     if st.button("🔄 Reset", use_container_width=True):
         for k in list(st.session_state.keys()): del st.session_state[k]
         st.rerun()
@@ -318,43 +351,42 @@ col1, col2 = st.columns([1, 1], gap="medium")
 with col1:
     st.markdown('<div class="compact-card">', unsafe_allow_html=True)
     st.markdown("#### 📤 Upload Signature Photo")
+    st.caption("Use a clear photo of your signature on white paper")
     file = st.file_uploader("", type=['png','jpg','jpeg','webp'], label_visibility="collapsed")
     if file:
         original = Image.open(file)
         if st.button("✨ Process Signature", type="primary", use_container_width=True):
-            with st.spinner("Extracting..."):
+            with st.spinner("Extracting signature..."):
                 final_img, method = process_signature(original, a_thresh, softness)
                 st.session_state.final_clean_rgba = final_img
                 st.session_state.method_used = method
-            st.success(f"✅ Done! ({method})")
+            st.success(f"✅ Done!")
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
     st.markdown('<div class="compact-card">', unsafe_allow_html=True)
     st.markdown("#### 🎯 Preview")
+    
     if st.session_state.final_clean_rgba:
-        display_img = st.session_state.final_clean_rgba.copy()
+        # Generate clean white preview
+        preview_bytes = signature_on_white_bg(st.session_state.final_clean_rgba)
         
-        # Show signature on clean white background (like paper)
-        paper_preview = preview_on_white(display_img)
-        
+        # Add watermark if not paid
         if not st.session_state.paid:
-            d = ImageDraw.Draw(paper_preview)
-            try: 
-                font = ImageFont.truetype("DejaVuSans-Bold.ttf", max(14, paper_preview.width // 18))
-            except: 
-                font = ImageFont.load_default()
-            d.text((10, 10), "PREVIEW • UNLOCK TO DOWNLOAD", fill=(180, 180, 180), font=font)
+            preview_bytes = add_watermark(preview_bytes, "PREVIEW")
         
-        st.markdown('<div class="preview-paper">', unsafe_allow_html=True)
-        st.image(paper_preview, use_container_width=False)
+        st.markdown('<div class="preview-box">', unsafe_allow_html=True)
+        st.image(preview_bytes, use_container_width=False)
         st.markdown('</div>', unsafe_allow_html=True)
         
-        badge = "badge-warning" if not st.session_state.paid else "badge-success"
-        text = "🔒 Watermarked" if not st.session_state.paid else "✅ Unlocked"
-        st.markdown(f'<br><span class="badge {badge}">{text}</span>', unsafe_allow_html=True)
+        # Status badge
+        if st.session_state.paid:
+            st.markdown('<br><span class="badge badge-success">✅ Unlocked — Full Quality</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<br><span class="badge badge-warning">🔒 Preview Only — Unlock for clean download</span>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="preview-paper"><p style="color:#94A3B8;">Upload a photo and click Process<br>to see your signature preview</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="preview-box" style="color:#94A3B8;">Upload a photo and click<br>Process Signature to see preview</div>', unsafe_allow_html=True)
+    
     st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================================================
@@ -362,40 +394,76 @@ with col2:
 # =========================================================
 if st.session_state.final_clean_rgba:
     st.markdown("<br>", unsafe_allow_html=True)
+    
     if st.session_state.paid:
         st.markdown('<div class="payment-strip">', unsafe_allow_html=True)
-        st.markdown('<b style="color:#065F46;">✅ Payment Confirmed — Files Ready</b>', unsafe_allow_html=True)
+        st.markdown('<b style="color:#065F46; font-size: 1.1rem;">✅ Payment Confirmed — Download Your Files</b>', unsafe_allow_html=True)
+        
         c1, c2 = st.columns(2)
         with c1:
             buf = io.BytesIO()
             st.session_state.final_clean_rgba.save(buf, format="PNG", optimize=True)
-            st.download_button("⬇ Download PNG", buf.getvalue(), "signature.png", "image/png", use_container_width=True, type="primary")
+            st.download_button("⬇ PNG", buf.getvalue(), "signature.png", "image/png", use_container_width=True, type="primary")
         with c2:
             if DOCX_AVAILABLE:
-                doc = Document(); doc.add_heading("Signature Asset", level=1)
+                doc = Document()
+                doc.add_heading("Signature Asset", level=1)
                 doc.add_paragraph("Place this image above your signature line. Choose Layout → In Front of Text.")
-                img_s = io.BytesIO(); st.session_state.final_clean_rgba.save(img_s, format="PNG")
+                img_s = io.BytesIO()
+                st.session_state.final_clean_rgba.save(img_s, format="PNG")
                 doc.add_picture(img_s, width=Inches(2.5))
-                doc_buf = io.BytesIO(); doc.save(doc_buf)
-                st.download_button("⬇ Download DOCX", doc_buf.getvalue(), "signature.docx", use_container_width=True, type="secondary")
+                doc_buf = io.BytesIO()
+                doc.save(doc_buf)
+                st.download_button("⬇ DOCX", doc_buf.getvalue(), "signature.docx", use_container_width=True, type="secondary")
+            else:
+                st.info("python-docx not installed")
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="payment-strip">', unsafe_allow_html=True)
-        st.markdown(f"<b>🔓 Unlock clean download — {CONFIG.price}</b>", unsafe_allow_html=True)
-        bc1, bc2, bc3 = st.columns([1,1,1.5], gap="small")
+        st.markdown(f'<b style="font-size: 1.1rem;">🔓 Unlock clean download — {CONFIG.price}</b>', unsafe_allow_html=True)
+        
+        bc1, bc2, bc3 = st.columns([1, 1, 1.5], gap="small")
         with bc1:
             if st.button("💳 Card", use_container_width=True):
                 if STRIPE_AVAILABLE and CONFIG.stripe_sk and CONFIG.stripe_price_id:
-                    stripe.api_key = CONFIG.stripe_sk
-                    sess = stripe.checkout.Session.create(mode="payment", line_items=[{"price": CONFIG.stripe_price_id, "quantity": 1}], success_url=f"{CONFIG.app_url}?paid=1&session_id={{CHECKOUT_SESSION_ID}}", cancel_url=CONFIG.app_url)
-                    st.markdown(f'<meta http-equiv="refresh" content="0;URL=\'{sess.url}\'" />', unsafe_allow_html=True)
+                    try:
+                        stripe.api_key = CONFIG.stripe_sk
+                        sess = stripe.checkout.Session.create(
+                            mode="payment",
+                            line_items=[{"price": CONFIG.stripe_price_id, "quantity": 1}],
+                            success_url=f"{CONFIG.app_url}?paid=1&session_id={{CHECKOUT_SESSION_ID}}",
+                            cancel_url=CONFIG.app_url
+                        )
+                        st.markdown(f'<meta http-equiv="refresh" content="0;URL=\'{sess.url}\'" />', unsafe_allow_html=True)
+                    except Exception as e:
+                        st.error(f"Stripe error")
+                else:
+                    st.warning("Unavailable")
+        
         with bc2:
-            if CONFIG.paypal_url: st.link_button("🔵 PayPal", CONFIG.paypal_url, use_container_width=True)
+            if CONFIG.paypal_url:
+                st.link_button("🔵 PayPal", CONFIG.paypal_url, use_container_width=True)
+            else:
+                st.warning("Unavailable")
+        
         with bc3:
-            with st.popover("🔑 Code"):
-                code = st.text_input("Access code", type="password")
-                if st.button("Unlock", use_container_width=True) and code.strip() == CONFIG.unlock_code.strip():
-                    st.session_state.paid = True; st.rerun()
+            with st.popover("🔑 Use Code"):
+                code = st.text_input("Access code", type="password", key="unlock_input")
+                if st.button("Unlock", use_container_width=True, key="unlock_btn"):
+                    if code.strip() == CONFIG.unlock_code.strip():
+                        st.session_state.paid = True
+                        st.success("Unlocked!")
+                        st.rerun()
+                    else:
+                        st.error("Invalid code")
         st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown(f'<div style="text-align:center;color:{C["muted"]};font-size:0.75rem;padding:1rem 0;border-top:1px solid {C["border"]};margin-top:1rem;">© 2026 Technoworks Pty Ltd · {CONFIG.app_name}</div>', unsafe_allow_html=True)
+# =========================================================
+# 11. FOOTER
+# =========================================================
+st.markdown(
+    '<div style="text-align:center; color:#94A3B8; font-size:0.75rem; padding:1rem 0; border-top:1px solid #E2E8F0; margin-top:1rem;">'
+    '© 2026 Technoworks Pty Ltd · Signature Studio Pro'
+    '</div>',
+    unsafe_allow_html=True
+)

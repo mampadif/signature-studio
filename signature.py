@@ -3,7 +3,7 @@ import io
 import streamlit as st
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, PngImagePlugin
 
 # =========================================================
@@ -46,186 +46,235 @@ class AppConfig:
 
 CONFIG = AppConfig()
 
-# Inline Theme Definition (Acts like config.toml)
-THEME_PRIMARY = "#2563EB"  # Royal Blue
-THEME_BG = "#F8FAFC"       # Soft Slate
-THEME_TEXT = "#0F172A"     # Deep Navy
+# Branding Colors
+PRIMARY = "#2563EB"
+BG_LIGHT = "#F8FAFC"
+TEXT_DARK = "#0F172A"
 
-st.set_page_config(
-    page_title=CONFIG.app_name, 
-    page_icon="🖊️", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title=CONFIG.app_name, page_icon="🖊️", layout="wide")
 
-# Initialize Session State
-for key, val in {"paid": False, "ai_calls_used": 0, "final_img": None, "method": ""}.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+if "paid" not in st.session_state: st.session_state.paid = False
+if "ai_calls_used" not in st.session_state: st.session_state.ai_calls_used = 0
+if "final_img" not in st.session_state: st.session_state.final_img = None
 
 # =========================================================
-# 3. THEME & CSS INJECTION (The "Inline config.toml")
+# 3. PREMIUM CSS INJECTION
 # =========================================================
 st.markdown(f"""
 <style>
-    /* 1. Global App Overrides */
-    .stApp {{
-        background-color: {THEME_BG} !important;
-        color: {THEME_TEXT} !important;
-    }}
+    .stApp {{ background-color: {BG_LIGHT} !important; }}
     
-    /* 2. Slider & Primary Highlight Overrides */
-    .stSlider [data-baseweb="slider"] {{
-        background-image: linear-gradient(to right, {THEME_PRIMARY} 0%, {THEME_PRIMARY} 100%) !important;
-    }}
-    
-    /* 3. Hero Section Design */
-    .hero-container {{
-        text-align: center !important;
-        padding: 4rem 2rem !important;
-        background: white !important;
-        border-radius: 32px !important;
-        border: 1px solid #E2E8F0 !important;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.03) !important;
-        margin-bottom: 2rem !important;
-    }}
-    .hero-container h1 {{
-        font-size: 3.5rem !important;
-        font-weight: 850 !important;
-        background: linear-gradient(90deg, {THEME_TEXT}, {THEME_PRIMARY}) !important;
-        -webkit-background-clip: text !important;
-        -webkit-text-fill-color: transparent !important;
-    }}
-
-    /* 4. Steps & Cards */
-    .step-card {{
-        background: white !important;
-        padding: 2rem !important;
-        border-radius: 24px !important;
-        border: 1px solid #E2E8F0 !important;
-        text-align: center !important;
-    }}
-
-    /* 5. Modern Buttons */
-    div.stButton > button {{
-        background-color: {THEME_PRIMARY} !important;
-        color: white !important;
-        border-radius: 14px !important;
-        height: 3.5rem !important;
-        font-weight: 700 !important;
-        border: none !important;
-        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2) !important;
-    }}
-    
-    /* 6. Sidebar Background */
+    /* Sidebar styling */
     [data-testid="stSidebar"] {{
         background-color: white !important;
-        border-right: 1px solid #E2E8F0 !important;
+        border-right: 1px solid #E2E8F0;
+    }}
+    
+    /* Hero Section */
+    .hero-box {{
+        background: white;
+        padding: 3rem 2rem;
+        border-radius: 24px;
+        border: 1px solid #E2E8F0;
+        text-align: center;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+    }}
+    .hero-box h1 {{
+        font-weight: 800;
+        background: linear-gradient(90deg, {TEXT_DARK}, {PRIMARY});
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 3rem !important;
+    }}
+    
+    /* Step Cards */
+    .step-card {{
+        background: white;
+        padding: 1.5rem;
+        border-radius: 16px;
+        border: 1px solid #E2E8F0;
+        text-align: center;
+        height: 100%;
+    }}
+
+    /* Result Preview Area */
+    .preview-container {{
+        background: #ffffff;
+        border-radius: 20px;
+        border: 1px solid #E2E8F0;
+        padding: 1rem;
+        box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.05);
+    }}
+
+    /* Custom Buttons */
+    div.stButton > button {{
+        background: {PRIMARY} !important;
+        color: white !important;
+        border-radius: 12px !important;
+        height: 3.5rem !important;
+        font-weight: 700 !important;
+        width: 100% !important;
+        border: none !important;
+        box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.2) !important;
+    }}
+    
+    /* Slider Color Force */
+    .stSlider [data-baseweb="slider"] {{
+        background-image: linear-gradient(to right, {PRIMARY} 0%, {PRIMARY} 100%) !important;
     }}
 </style>
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 4. PROCESSING LOGIC
+# 4. RESTORED EXTRACTION ENGINE (YOUR ORIGINAL LOGIC)
 # =========================================================
 
-def extract_signature(img, a_thresh):
-    img = ImageOps.exif_transpose(img)
+def connected_components(mask):
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    components = []
+    for y in range(height):
+        for x in range(width):
+            if not mask[y, x] or visited[y, x]: continue
+            stack, pixels = [(y, x)], []
+            visited[y, x] = True
+            while stack:
+                cy, cx = stack.pop()
+                pixels.append((cy, cx))
+                for ny in range(cy-1, cy+2):
+                    for nx in range(cx-1, cx+2):
+                        if 0 <= ny < height and 0 <= nx < width:
+                            if mask[ny, nx] and not visited[ny, nx]:
+                                visited[ny, nx] = True
+                                stack.append((ny, nx))
+            components.append(pixels)
+    return components
+
+def validate_quality(img: Image.Image) -> Tuple[bool, str]:
+    arr = np.array(img.convert("RGB"))
+    h, w, _ = arr.shape
+    if w < 250 or h < 250: return False, "Image too small."
+    gray = (0.299*arr[:,:,0] + 0.587*arr[:,:,1] + 0.114*arr[:,:,2]).astype(np.uint8)
+    ink_ratio = float((gray < 170).sum()) / (w * h)
+    if ink_ratio < 0.0003: return False, "Signature not detected. Use a darker pen."
+    return True, "Valid"
+
+def process_pipeline(original_img, a_thresh, softness):
+    img = ImageOps.exif_transpose(original_img)
     
-    # AI Engine
-    extracted = None
+    # 1. AI EXTRACTOR (PRIMARY)
     if HAS_GENAI and CONFIG.api_key and st.session_state.ai_calls_used < CONFIG.max_calls:
         try:
             client = genai.Client(api_key=CONFIG.api_key)
-            prompt = "Isolate the handwritten signature ink. Output black ink on white background."
-            response = client.models.generate_content(model=CONFIG.ai_model, contents=[prompt, img])
+            response = client.models.generate_content(
+                model=CONFIG.ai_model, 
+                contents=["Extract ONLY the signature ink. Output black ink on white.", img]
+            )
             for part in response.candidates[0].content.parts:
                 if part.inline_data:
-                    extracted = part.as_image().convert("RGBA")
+                    img = part.as_image()
                     st.session_state.ai_calls_used += 1
-                    st.session_state.method = "AI Enhanced"
                     break
         except: pass
 
-    if extracted is None:
-        extracted = img.convert("RGBA")
-        st.session_state.method = "Standard Extraction"
-
-    # Remove White Background
-    data = np.array(extracted)
-    r, g, b, a = data[:,:,0], data[:,:,1], data[:,:,2], data[:,:,3]
-    white_mask = (r > a_thresh) & (g > a_thresh) & (b > a_thresh)
-    data[white_mask, 3] = 0 
-    data[~white_mask, :3] = 0 # Force Black
+    # 2. ADVANCED TRANSPARENCY (RESTORED SOFT LOGIC)
+    img = img.convert("RGBA")
+    arr = np.array(img)
+    brightness = arr[:, :, :3].mean(axis=2)
     
-    final = Image.fromarray(data)
+    # Soft transparency mask
+    soft_start = a_thresh - softness
+    alpha = np.where(brightness >= a_thresh, 0, 
+             np.where(brightness <= soft_start, 255,
+             ((a_thresh - brightness) / (a_thresh - soft_start) * 255)))
+    
+    arr[:, :, 3] = alpha.astype(np.uint8)
+    
+    # Force ink to be dark
+    ink = alpha > 0
+    arr[ink, 0:3] = np.minimum(arr[ink, 0:3], 30) # Keep strokes dark/black
+    
+    final = Image.fromarray(arr)
+    
+    # 3. NOISE REMOVAL & TIGHT CROP
     bbox = final.getchannel("A").getbbox()
-    return final.crop(bbox) if bbox else final
+    if bbox: final = final.crop(bbox)
+    
+    return final
 
 # =========================================================
-# 5. WEBSITE UI
+# 5. UI APP FLOW
 # =========================================================
 
 with st.sidebar:
-    st.markdown(f"### ⚙️ {CONFIG.app_name}")
-    st.caption("Fine-tune your output here.")
-    a_thresh = st.slider("Paper Removal Threshold", 200, 255, 248)
+    st.image("https://cdn-icons-png.flaticon.com/512/3163/3163195.png", width=60)
+    st.title("Studio Settings")
+    a_thresh = st.slider("Paper Removal", 200, 255, 248)
+    softness = st.slider("Edge Softness", 5, 40, 18)
     st.divider()
-    st.info(f"AI Quota: {st.session_state.ai_calls_used}/{CONFIG.max_calls}")
-    if st.button("Reset Session"):
+    st.write(f"AI Quota: {st.session_state.ai_calls_used}/{CONFIG.max_calls}")
+    if st.button("🔄 Reset Studio"):
         st.session_state.clear()
         st.rerun()
 
 # Hero Section
 st.markdown(f"""
-<div class="hero-container">
+<div class="hero-box">
     <h1>{CONFIG.app_name}</h1>
-    <p>Convert handwriting into high-res digital assets in seconds.</p>
+    <p>Professional AI-powered signature extraction for your digital documents.</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Process Steps
-col1, col2, col3 = st.columns(3)
-with col1: st.markdown('<div class="step-card"><h3>1</h3><b>Upload Photo</b></div>', unsafe_allow_html=True)
-with col2: st.markdown('<div class="step-card"><h3>2</h3><b>AI Processing</b></div>', unsafe_allow_html=True)
-with col3: st.markdown('<div class="step-card"><h3>3</h3><b>Download PNG</b></div>', unsafe_allow_html=True)
+# Steps
+c1, c2, c3 = st.columns(3)
+with c1: st.markdown('<div class="step-card"><b>1. Upload</b><br><small>Photo of signature</small></div>', unsafe_allow_html=True)
+with c2: st.markdown('<div class="step-card"><b>2. AI Cleanup</b><br><small>Isolating the ink</small></div>', unsafe_allow_html=True)
+with c3: st.markdown('<div class="step-card"><b>3. Download</b><br><small>Pro PNG & Word files</small></div>', unsafe_allow_html=True)
 
-st.write("---")
+st.divider()
 
-# Interface Split
+# Working Area
 left, right = st.columns([1, 1], gap="large")
 
 with left:
-    st.markdown("### 📂 Upload Image")
+    st.subheader("📂 Upload Photo")
     file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], label_visibility="collapsed")
     if file:
         original = Image.open(file)
         if st.button("✨ Extract Signature", use_container_width=True):
-            with st.spinner("Analyzing and cleaning..."):
-                st.session_state.final_img = extract_signature(original, a_thresh)
+            is_valid, msg = validate_quality(original)
+            if not is_valid:
+                st.error(msg)
+            else:
+                with st.spinner("AI is digitizing strokes..."):
+                    st.session_state.final_img = process_pipeline(original, a_thresh, softness)
 
 with right:
-    st.markdown("### 🎯 Preview")
+    st.subheader("🎯 Result Preview")
     if st.session_state.final_img:
-        preview = st.session_state.final_img.copy()
+        st.markdown('<div class="preview-container">', unsafe_allow_html=True)
+        # Display with watermark if not paid
+        display_img = st.session_state.final_img.copy()
         if not st.session_state.paid:
-            draw = ImageDraw.Draw(preview)
-            draw.text((20, 20), "PREVIEW WATERMARK", fill=(200, 200, 200))
-        st.image(preview, use_container_width=True, caption=f"Processing Engine: {st.session_state.method}")
+            d = ImageDraw.Draw(display_img)
+            d.text((10, 10), "PREVIEW WATERMARK", fill=(150, 150, 150))
+        st.image(display_img, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
     else:
-        st.info("Awaiting upload...")
+        st.info("Upload a clear photo to begin.")
 
-# Payment & Unlock Logic
+# Payment & Unlock
 if st.session_state.final_img:
-    st.divider()
+    st.write("---")
     if st.session_state.paid:
-        st.success("Download Unlocked!")
-        dcol1, dcol2 = st.columns(2)
-        with dcol1:
+        st.success("✅ Files Unlocked! Download your pro assets below.")
+        d1, d2 = st.columns(2)
+        with d1:
             buf = io.BytesIO()
             st.session_state.final_img.save(buf, format="PNG")
-            st.download_button("⬇️ Get Transparent PNG", buf.getvalue(), "sig_pro.png", "image/png")
-        with dcol2:
+            st.download_button("⬇️ Download PNG", buf.getvalue(), "signature.png", "image/png")
+        with d2:
             if DOCX_AVAILABLE:
                 doc = Document()
                 img_s = io.BytesIO()
@@ -233,12 +282,12 @@ if st.session_state.final_img:
                 doc.add_picture(img_s, width=Inches(2))
                 dbuf = io.BytesIO()
                 doc.save(dbuf)
-                st.download_button("⬇️ Get Word File", dbuf.getvalue(), "sig_pro.docx")
+                st.download_button("⬇️ Download Word (.docx)", dbuf.getvalue(), "signature.docx")
     else:
         st.markdown(f"""
-        <div style="background: white; padding: 2rem; border-radius: 24px; text-align:center; border: 1px solid #E2E8F0;">
-            <h3>Unlock Pro Files for {CONFIG.price}</h3>
-            <p>Removes watermark and provides high-res transparency.</p>
+        <div style="background: white; padding: 2rem; border-radius: 20px; text-align:center; border: 1px solid #E2E8F0;">
+            <h3>Unlock Professional Files</h3>
+            <p>One-time payment of <b>{CONFIG.price}</b> to get transparent high-res files.</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -255,12 +304,12 @@ if st.session_state.final_img:
                     )
                     st.markdown(f'<meta http-equiv="refresh" content="0;URL=\'{sess.url}\'" />', unsafe_allow_html=True)
         with p2:
-            st.link_button("🔵 Pay with PayPal", CONFIG.paypal_url)
+            st.link_button("🔵 Pay via PayPal", CONFIG.paypal_url)
 
-        with st.expander("Already Paid?"):
-            code = st.text_input("Enter Code", type="password")
-            if st.button("Verify"):
-                if code == CONFIG.unlock_code:
+        with st.expander("Already paid?"):
+            ucode = st.text_input("Enter Unlock Code", type="password")
+            if st.button("Unlock"):
+                if ucode == CONFIG.unlock_code:
                     st.session_state.paid = True
                     st.rerun()
 

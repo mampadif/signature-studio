@@ -60,9 +60,12 @@ C = {
 
 st.set_page_config(page_title=CONFIG.app_name, page_icon="🖊️", layout="wide")
 
-if "paid" not in st.session_state: st.session_state.paid = False
-if "ai_calls_used" not in st.session_state: st.session_state.ai_calls_used = 0
-if "final_img" not in st.session_state: st.session_state.final_img = None
+if "paid" not in st.session_state:
+    st.session_state.paid = False
+if "ai_calls_used" not in st.session_state:
+    st.session_state.ai_calls_used = 0
+if "final_img" not in st.session_state:
+    st.session_state.final_img = None
 
 # =========================================================
 # 3. COMPACT CSS (Minimal scrolling, max density)
@@ -200,19 +203,26 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 4. EXTRACTION ENGINE
+# 4. EXTRACTION ENGINE (FIXED)
 # =========================================================
+
 def validate_quality(img: Image.Image) -> Tuple[bool, str]:
+    """Ensures input meets technical standards for extraction."""
     arr = np.array(img.convert("RGB"))
     h, w, _ = arr.shape
-    if w < 250 or h < 250: return False, "Photo resolution too low."
+    if w < 250 or h < 250:
+        return False, "Photo resolution too low."
     gray = (0.299*arr[:,:,0] + 0.587*arr[:,:,1] + 0.114*arr[:,:,2]).astype(np.uint8)
     ink_ratio = float((gray < 185).sum()) / (w * h)
-    if ink_ratio < 0.0002: return False, "No clear signature detected."
+    if ink_ratio < 0.0002:
+        return False, "No clear signature detected."
     return True, "OK"
 
+
 def process_pipeline(original_img, a_thresh, softness):
+    """The master pipeline combining AI unboxing and soft-edge logic."""
     img = ImageOps.exif_transpose(original_img)
+    
     if HAS_GENAI and CONFIG.api_key and st.session_state.ai_calls_used < CONFIG.max_calls:
         try:
             client = genai.Client(api_key=CONFIG.api_key)
@@ -220,22 +230,64 @@ def process_pipeline(original_img, a_thresh, softness):
                 model=CONFIG.ai_model,
                 contents=["Extract ONLY the signature ink. High contrast black ink on pure white background.", img]
             )
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'inline_data') or hasattr(part, 'as_image'):
-                    img = part.as_image()
-                    st.session_state.ai_calls_used += 1
-                    break
-        except: pass
+            
+            # Safely extract image from response
+            image_found = False
+            if hasattr(response, 'candidates') and response.candidates:
+                for candidate in response.candidates:
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'inline_data'):
+                                img = Image.open(io.BytesIO(part.inline_data.data))
+                                image_found = True
+                                st.session_state.ai_calls_used += 1
+                                break
+                            elif hasattr(part, 'as_image'):
+                                result = part.as_image()
+                                if isinstance(result, Image.Image):
+                                    img = result
+                                    image_found = True
+                                    st.session_state.ai_calls_used += 1
+                                    break
+                    if image_found:
+                        break
+            
+            if not image_found and hasattr(response, 'parts'):
+                for part in response.parts:
+                    if hasattr(part, 'inline_data'):
+                        img = Image.open(io.BytesIO(part.inline_data.data))
+                        st.session_state.ai_calls_used += 1
+                        break
+                    elif hasattr(part, 'as_image'):
+                        result = part.as_image()
+                        if isinstance(result, Image.Image):
+                            img = result
+                            st.session_state.ai_calls_used += 1
+                            break
+        except Exception:
+            # Silent fail - continue with local processing
+            pass
+
+    # Fallback - ensure we have a valid PIL image
+    if not isinstance(img, Image.Image):
+        img = original_img.copy()
+    
+    # Proceed with transparency processing
     img = img.convert("RGBA")
     arr = np.array(img)
     brightness = arr[:, :, :3].mean(axis=2)
     soft_start = a_thresh - softness
-    alpha = np.where(brightness >= a_thresh, 0, np.where(brightness <= soft_start, 255, ((a_thresh - brightness) / (a_thresh - soft_start) * 255)))
+    alpha = np.where(brightness >= a_thresh, 0, 
+             np.where(brightness <= soft_start, 255,
+             ((a_thresh - brightness) / (a_thresh - soft_start) * 255)))
     arr[:, :, 3] = alpha.astype(np.uint8)
     arr[alpha > 0, 0:3] = np.minimum(arr[alpha > 0, 0:3], 25)
+    
     final = Image.fromarray(arr)
     bbox = final.getchannel("A").getbbox()
-    if bbox: final = final.crop(bbox)
+    if bbox:
+        final = final.crop(bbox)
+    
     return final
 
 # =========================================================
@@ -281,9 +333,11 @@ with col1:
             is_valid, msg = validate_quality(original)
             if not is_valid:
                 st.error(msg)
+                st.info("💡 Use clean white paper with good lighting for best results.")
             else:
                 with st.spinner("Extracting..."):
                     st.session_state.final_img = process_pipeline(original, a_thresh, softness)
+                st.success("✅ Done!")
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
@@ -321,49 +375,77 @@ if st.session_state.final_img:
     
     if st.session_state.paid:
         st.markdown('<div class="payment-strip">', unsafe_allow_html=True)
-        st.markdown('<b style="color:#065F46;">✅ Payment Confirmed</b>', unsafe_allow_html=True)
+        st.markdown('<b style="color:#065F46;">✅ Payment Confirmed — Your files are ready</b>', unsafe_allow_html=True)
         
         c1, c2 = st.columns(2)
         with c1:
             buf = io.BytesIO()
             st.session_state.final_img.save(buf, format="PNG", optimize=True)
-            st.download_button("⬇ PNG", buf.getvalue(), "signature.png", "image/png", use_container_width=True)
+            st.download_button(
+                "⬇ Download PNG",
+                buf.getvalue(),
+                "signature.png",
+                "image/png",
+                use_container_width=True,
+                type="primary"
+            )
         with c2:
             if DOCX_AVAILABLE:
                 doc = Document()
+                doc.add_heading("Signature Asset", level=1)
+                doc.add_paragraph("Place in your document. Choose Layout → In Front of Text.")
                 img_s = io.BytesIO()
                 st.session_state.final_img.save(img_s, format="PNG")
                 doc.add_picture(img_s, width=Inches(2.5))
                 doc_buf = io.BytesIO()
                 doc.save(doc_buf)
-                st.download_button("⬇ DOCX", doc_buf.getvalue(), "signature.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
+                st.download_button(
+                    "⬇ Download DOCX",
+                    doc_buf.getvalue(),
+                    "signature.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                    type="secondary"
+                )
+            else:
+                st.warning("python-docx not installed")
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="payment-strip">', unsafe_allow_html=True)
         st.markdown(f"<b>🔓 Unlock clean download — {CONFIG.price}</b>", unsafe_allow_html=True)
         
-        bc1, bc2, bc3 = st.columns([1,1,1.5], gap="small")
+        bc1, bc2, bc3 = st.columns([1, 1, 1.5], gap="small")
         with bc1:
             if st.button("💳 Card", use_container_width=True, key="card_btn"):
                 if STRIPE_AVAILABLE and CONFIG.stripe_sk and CONFIG.stripe_price_id:
-                    stripe.api_key = CONFIG.stripe_sk
-                    sess = stripe.checkout.Session.create(
-                        mode="payment",
-                        line_items=[{"price": CONFIG.stripe_price_id, "quantity": 1}],
-                        success_url=f"{CONFIG.app_url}?paid=1&session_id={{CHECKOUT_SESSION_ID}}",
-                        cancel_url=CONFIG.app_url
-                    )
-                    st.markdown(f'<meta http-equiv="refresh" content="0;URL=\'{sess.url}\'" />', unsafe_allow_html=True)
+                    try:
+                        stripe.api_key = CONFIG.stripe_sk
+                        sess = stripe.checkout.Session.create(
+                            mode="payment",
+                            line_items=[{"price": CONFIG.stripe_price_id, "quantity": 1}],
+                            success_url=f"{CONFIG.app_url}?paid=1&session_id={{CHECKOUT_SESSION_ID}}",
+                            cancel_url=CONFIG.app_url
+                        )
+                        st.markdown(f'<meta http-equiv="refresh" content="0;URL=\'{sess.url}\'" />', unsafe_allow_html=True)
+                    except Exception:
+                        st.error("Stripe not configured")
+                else:
+                    st.warning("Stripe unavailable")
         with bc2:
             if CONFIG.paypal_url:
                 st.link_button("🔵 PayPal", CONFIG.paypal_url, use_container_width=True)
+            else:
+                st.warning("PayPal URL not set")
         with bc3:
             with st.popover("🔑 Code"):
-                code = st.text_input("Access code", type="password")
-                if st.button("Unlock", use_container_width=True):
+                code = st.text_input("Access code", type="password", key="unlock_input")
+                if st.button("Unlock", use_container_width=True, key="unlock_btn"):
                     if code.strip() == CONFIG.unlock_code.strip():
                         st.session_state.paid = True
+                        st.success("Unlocked!")
                         st.rerun()
+                    else:
+                        st.error("Invalid code")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================================================

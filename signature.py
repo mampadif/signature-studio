@@ -3,12 +3,8 @@ import io
 import streamlit as st
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+from PIL import Image, ImageOps, ImageFilter
 
-# =========================================================
-# 1. IMPORTS & COMPATIBILITY
-# =========================================================
 try:
     import stripe
     STRIPE_AVAILABLE = True
@@ -24,20 +20,17 @@ except ImportError:
 
 try:
     from google import genai
-    HAS_GENAI = True
+    HAS_IMAGE_ENGINE = True
 except ImportError:
-    HAS_GENAI = False
+    HAS_IMAGE_ENGINE = False
 
 
-# =========================================================
-# 2. CONFIGURATION
-# =========================================================
 @dataclass
 class AppConfig:
-    api_key: str = st.secrets.get("GEMINI_API_KEY", "")
-    ai_model: str = st.secrets.get("GEMINI_MODEL", "gemini-3.1-flash-image-preview")
+    image_key: str = st.secrets.get("GEMINI_API_KEY", "")
+    image_model: str = st.secrets.get("GEMINI_MODEL", "gemini-3.1-flash-image-preview")
     app_name: str = st.secrets.get("APP_NAME", "Signature Studio Pro")
-    max_calls: int = int(st.secrets.get("MAX_AI_CALLS_PER_SESSION", 3))
+    max_enhancements: int = int(st.secrets.get("MAX_AI_CALLS_PER_SESSION", 3))
     stripe_sk: str = st.secrets.get("STRIPE_SECRET_KEY", "")
     stripe_price_id: str = st.secrets.get("STRIPE_PRICE_ID_SIGNATURE", "")
     paypal_url: str = st.secrets.get("PAYPAL_PAYMENT_URL", "")
@@ -55,12 +48,9 @@ st.set_page_config(
 )
 
 
-# =========================================================
-# 3. SESSION STATE
-# =========================================================
 defaults = {
     "paid": False,
-    "ai_calls_used": 0,
+    "enhancements_used": 0,
     "base_image": None,
     "final_clean_rgba": None,
     "uploaded_filename": None,
@@ -71,9 +61,6 @@ for key, value in defaults.items():
         st.session_state[key] = value
 
 
-# =========================================================
-# 4. CSS
-# =========================================================
 st.markdown("""
 <style>
     .stApp {
@@ -179,8 +166,25 @@ st.markdown("""
         border-right: none;
     }
 
-    [data-testid="stSidebar"] * {
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
         color: #E2E8F0 !important;
+    }
+
+    [data-testid="stSidebar"] button {
+        background: #334155 !important;
+        color: #FFFFFF !important;
+        border-radius: 8px !important;
+        border: 1px solid #64748B !important;
+    }
+
+    [data-testid="stSidebar"] button:hover {
+        background: #475569 !important;
+        color: #FFFFFF !important;
     }
 
     .block-container {
@@ -191,9 +195,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# =========================================================
-# 5. BASIC IMAGE HELPERS
-# =========================================================
 def fix_image_orientation(image: Image.Image) -> Image.Image:
     try:
         return ImageOps.exif_transpose(image)
@@ -246,9 +247,6 @@ def preview_html_image(img_bytes: bytes, width: int = 520, height: int = 260) ->
     """
 
 
-# =========================================================
-# 6. COMPONENT DETECTION
-# =========================================================
 def connected_components(mask: np.ndarray):
     h, w = mask.shape
     visited = np.zeros_like(mask, dtype=bool)
@@ -284,10 +282,6 @@ def detect_signature_bbox(
     darkness_threshold: int = 170,
     padding: int = 35
 ) -> Image.Image:
-    """
-    Attempts to crop around the signature area only.
-    Avoids large dark borders and solid background blocks.
-    """
     image = image.convert("RGB")
     arr = np.array(image, dtype=np.uint8)
 
@@ -299,7 +293,6 @@ def detect_signature_bbox(
 
     mask = gray < darkness_threshold
     h, w = mask.shape
-
     components = connected_components(mask)
     candidates = []
 
@@ -374,14 +367,7 @@ def enhance_crop_before_extraction(image: Image.Image, min_width: int = 1200) ->
     return img
 
 
-# =========================================================
-# 7. BACKGROUND AND TRANSPARENCY PIPELINE
-# =========================================================
 def force_black_ink_on_white(image: Image.Image, threshold: int = 180) -> Image.Image:
-    """
-    Converts any AI/local output into a safe white-background base image.
-    This prevents black opaque backgrounds from entering the preview.
-    """
     img = image.convert("RGB")
     arr = np.array(img, dtype=np.uint8)
 
@@ -404,17 +390,10 @@ def white_to_transparent_soft(
     threshold: int = 248,
     softness: int = 18
 ) -> Image.Image:
-    """
-    Slider-controlled transparency:
-    - threshold removes white/light background
-    - softness controls edge blending
-    """
     image = ensure_pil_image(image)
     arr = np.array(image, dtype=np.uint8)
 
-    rgb = arr[:, :, :3]
-    brightness = rgb.mean(axis=2)
-
+    brightness = arr[:, :, :3].mean(axis=2)
     soft_start = max(0, threshold - softness)
     denom = max(1, threshold - soft_start)
 
@@ -559,10 +538,6 @@ def render_signature_on_white(
     box_w: int = 520,
     box_h: int = 260
 ) -> bytes:
-    """
-    Creates a clean white preview image so transparent areas never appear black.
-    The signature keeps its natural aspect ratio.
-    """
     sig = sig_img.convert("RGBA")
 
     bbox = sig.getchannel("A").getbbox()
@@ -582,17 +557,14 @@ def render_signature_on_white(
     return buf.getvalue()
 
 
-# =========================================================
-# 8. AI EXTRACTION
-# =========================================================
-def ask_ai_extract_signature_only(
+def enhanced_signature_extraction(
     cropped_image: Image.Image,
     model_name: str
 ) -> Image.Image:
-    client = genai.Client(api_key=CONFIG.api_key)
+    client = genai.Client(api_key=CONFIG.image_key)
 
     prompt = """
-Extract ONLY the handwritten signature ink.
+Extract only the handwritten signature ink.
 Remove paper, background, shadows, borders, and objects.
 Return black signature ink on a clean white background.
 Keep the original signature shape and proportions.
@@ -603,7 +575,7 @@ Keep the original signature shape and proportions.
         contents=[prompt, cropped_image]
     )
 
-    st.session_state.ai_calls_used += 1
+    st.session_state.enhancements_used += 1
 
     parts = getattr(response, "parts", None)
     if parts:
@@ -620,26 +592,23 @@ Keep the original signature shape and proportions.
                     if getattr(part, "inline_data", None) is not None:
                         return ensure_pil_image(part.as_image())
 
-    raise RuntimeError("AI did not return an image.")
+    raise RuntimeError("Image enhancement did not return an image.")
 
 
-# =========================================================
-# 9. MAIN EXTRACTION
-# =========================================================
 def extract_base_image(original: Image.Image) -> Image.Image | None:
-    """
-    Extracts a safe black-ink-on-white base image once.
-    Sliders then update transparency live without using more AI calls.
-    """
     image = fix_image_orientation(original)
     image = smart_resize_for_processing(image, 2400)
 
     crop = detect_signature_bbox(image, 170, 35)
     enhanced = enhance_crop_before_extraction(crop, 1200)
 
-    if HAS_GENAI and CONFIG.api_key and st.session_state.ai_calls_used < CONFIG.max_calls:
+    if (
+        HAS_IMAGE_ENGINE
+        and CONFIG.image_key
+        and st.session_state.enhancements_used < CONFIG.max_enhancements
+    ):
         try:
-            cleaned = ask_ai_extract_signature_only(enhanced, CONFIG.ai_model)
+            cleaned = enhanced_signature_extraction(enhanced, CONFIG.image_model)
             return force_black_ink_on_white(cleaned, threshold=180)
         except Exception:
             pass
@@ -658,70 +627,55 @@ def build_final_from_sliders(
         softness=softness
     )
 
-    final_rgba = finalize_signature_only(transparent)
-    return final_rgba
+    return finalize_signature_only(transparent)
 
 
-# =========================================================
-# 10. SIDEBAR
-# =========================================================
 with st.sidebar:
-    st.markdown("## ⚙️ Settings")
+    st.markdown("## ⚙️ Adjust Signature")
 
     a_thresh = st.slider(
-        "Threshold",
+        "Background Removal Strength",
         200,
         255,
         248,
-        help="Higher values remove more white background."
+        help="Increase to remove more paper background."
     )
 
     softness = st.slider(
-        "Smoothing",
+        "Edge Smoothness",
         5,
         45,
         18,
-        help="Higher values make the signature edges softer."
+        help="Increase for softer signature edges."
     )
 
     st.divider()
 
-    st.markdown(
-        f"🖊️ AI calls: **{st.session_state.ai_calls_used}/{CONFIG.max_calls}**"
-    )
+    st.caption("Tip: move the sliders until the signature looks clean and sharp.")
 
-    if st.button("🔄 Reset", use_container_width=True):
+    if st.button("🔄 Reset", use_container_width=True, type="secondary"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
 
 
-# =========================================================
-# 11. HEADER
-# =========================================================
 st.markdown(f"""
 <div class="compact-header">
     <div class="logo-icon">🖊️</div>
     <div>
         <h1>{CONFIG.app_name}</h1>
-        <p>Professional signature background remover and document-ready exporter</p>
+        <p>Clean, document-ready signatures in seconds</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 
-# =========================================================
-# 12. PAYMENT RETURN CHECK
-# =========================================================
 query_params = st.query_params
 
 if query_params.get("paid") == "1":
     st.session_state.paid = True
 
 
-# =========================================================
-# 13. MAIN LAYOUT
-# =========================================================
 col1, col2 = st.columns([1, 1], gap="medium")
 
 with col1:
@@ -749,14 +703,14 @@ with col1:
             type="primary",
             use_container_width=True
         ):
-            with st.spinner("Extracting signature..."):
+            with st.spinner("Preparing signature..."):
                 base = extract_base_image(original)
 
                 if base is not None:
                     st.session_state.base_image = base
                     st.success("✅ Done! Adjust the sliders to fine-tune.")
                 else:
-                    st.error("Extraction failed. Please try a clearer image.")
+                    st.error("Processing failed. Please try a clearer image.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -809,14 +763,12 @@ with col2:
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# =========================================================
-# 14. PAYMENT AND DOWNLOAD
-# =========================================================
 if st.session_state.final_clean_rgba is not None:
     st.markdown("<br>", unsafe_allow_html=True)
 
     if st.session_state.paid:
         st.markdown('<div class="payment-strip">', unsafe_allow_html=True)
+
         st.markdown(
             '<b style="color:#065F46; font-size:1.1rem;">✅ Payment Confirmed — Download Your Files</b>',
             unsafe_allow_html=True
@@ -867,7 +819,7 @@ if st.session_state.final_clean_rgba is not None:
                     type="secondary"
                 )
             else:
-                st.info("DOCX export unavailable. Install python-docx.")
+                st.info("DOCX export unavailable.")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -943,9 +895,6 @@ if st.session_state.final_clean_rgba is not None:
         st.markdown('</div>', unsafe_allow_html=True)
 
 
-# =========================================================
-# 15. FOOTER
-# =========================================================
 st.markdown(
     """
     <div style="

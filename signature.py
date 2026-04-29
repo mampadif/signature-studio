@@ -78,11 +78,21 @@ st.markdown(f"""
     .compact-header p {{ color: rgba(255,255,255,0.85); margin: 0; font-size: 0.85rem; }}
     .logo-icon {{ font-size: 2.5rem; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2)); }}
     .compact-card {{ background: {C["surface"]}; border: 1px solid {C["border"]}; border-radius: 12px; padding: 1rem; }}
-    .preview-area {{
-        background: {C["surface"]}; border-radius: 12px; border: 2px solid {C["border"]};
-        padding: 1.5rem; text-align: center; min-height: 250px;
-        display: flex; align-items: center; justify-content: center;
+    
+    /* Clean white preview - looks like paper */
+    .preview-paper {{
+        background: #FFFFFF;
+        border-radius: 12px;
+        border: 1px solid #E2E8F0;
+        padding: 2rem;
+        text-align: center;
+        min-height: 250px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }}
+    
     .payment-strip {{
         background: linear-gradient(90deg, #FFF7ED, #FFFBEB); border: 1px solid #FED7AA;
         border-radius: 12px; padding: 1rem 1.5rem; display: flex;
@@ -101,7 +111,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 4. PROVEN IMAGE HELPERS (from sample code)
+# 4. IMAGE HELPERS
 # =========================================================
 
 def fix_image_orientation(image: Image.Image) -> Image.Image:
@@ -119,25 +129,16 @@ def smart_resize_for_processing(image: Image.Image, max_pixels: int = 2400) -> I
     ratio = max_pixels / max(w, h)
     return image.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
 
-def create_checkerboard_bg(size: tuple, square_size: int = 16) -> Image.Image:
-    bg = Image.new("RGBA", size, (255,255,255,255))
-    draw = ImageDraw.Draw(bg)
-    light, dark = (242,244,247,255), (222,226,231,255)
-    for y in range(0, size[1], square_size):
-        for x in range(0, size[0], square_size):
-            fill = light if ((x//square_size + y//square_size) % 2 == 0) else dark
-            draw.rectangle([x, y, x+square_size, y+square_size], fill=fill)
-    return bg
-
-def preview_transparent_image(sig_img: Image.Image) -> Image.Image:
+def preview_on_white(sig_img: Image.Image) -> Image.Image:
+    """Place the transparent signature on a clean white background so users see it as it would look on paper."""
     sig_img = sig_img.convert("RGBA")
-    bg = create_checkerboard_bg(sig_img.size)
+    bg = Image.new("RGBA", sig_img.size, (255, 255, 255, 255))
     out = bg.copy()
-    out.paste(sig_img, (0,0), sig_img)
-    return out
+    out.paste(sig_img, (0, 0), sig_img)
+    return out.convert("RGB")
 
 # =========================================================
-# 5. PROVEN TRANSPARENCY PIPELINE (from sample code)
+# 5. TRANSPARENCY PIPELINE
 # =========================================================
 
 def white_to_transparent_soft(image: Image.Image, threshold: int = 248, softness: int = 18) -> Image.Image:
@@ -236,7 +237,7 @@ def finalize_signature_only(image: Image.Image) -> Image.Image:
     return image
 
 # =========================================================
-# 6. AI EXTRACTION (with safe fallback)
+# 6. AI EXTRACTION
 # =========================================================
 
 def ask_ai_extract_signature_only(cropped_image: Image.Image, model_name: str) -> Image.Image:
@@ -272,7 +273,7 @@ def process_signature(image: Image.Image, a_thresh: int, softness: int) -> Tuple
         except Exception:
             pass
     
-    # Local fallback
+    # Local fallback (always works, no AI needed)
     img = image.convert("RGBA")
     arr = np.array(img, dtype=np.uint8)
     gray = (0.299*arr[:,:,0] + 0.587*arr[:,:,1] + 0.114*arr[:,:,2])
@@ -333,19 +334,27 @@ with col2:
     st.markdown("#### 🎯 Preview")
     if st.session_state.final_clean_rgba:
         display_img = st.session_state.final_clean_rgba.copy()
+        
+        # Show signature on clean white background (like paper)
+        paper_preview = preview_on_white(display_img)
+        
         if not st.session_state.paid:
-            d = ImageDraw.Draw(display_img)
-            try: font = ImageFont.truetype("DejaVuSans-Bold.ttf", max(12, display_img.width//20))
-            except: font = ImageFont.load_default()
-            d.text((8,8), "PREVIEW", fill=(180,180,180,150), font=font)
-        st.markdown('<div class="preview-area">', unsafe_allow_html=True)
-        st.image(preview_transparent_image(display_img), use_container_width=False)
+            d = ImageDraw.Draw(paper_preview)
+            try: 
+                font = ImageFont.truetype("DejaVuSans-Bold.ttf", max(14, paper_preview.width // 18))
+            except: 
+                font = ImageFont.load_default()
+            d.text((10, 10), "PREVIEW • UNLOCK TO DOWNLOAD", fill=(180, 180, 180), font=font)
+        
+        st.markdown('<div class="preview-paper">', unsafe_allow_html=True)
+        st.image(paper_preview, use_container_width=False)
         st.markdown('</div>', unsafe_allow_html=True)
+        
         badge = "badge-warning" if not st.session_state.paid else "badge-success"
         text = "🔒 Watermarked" if not st.session_state.paid else "✅ Unlocked"
         st.markdown(f'<br><span class="badge {badge}">{text}</span>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="preview-area"><p style="color:#94A3B8;">Upload a photo and click Process</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="preview-paper"><p style="color:#94A3B8;">Upload a photo and click Process<br>to see your signature preview</p></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================================================
@@ -355,23 +364,24 @@ if st.session_state.final_clean_rgba:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.session_state.paid:
         st.markdown('<div class="payment-strip">', unsafe_allow_html=True)
-        st.markdown('<b style="color:#065F46;">✅ Payment Confirmed</b>', unsafe_allow_html=True)
+        st.markdown('<b style="color:#065F46;">✅ Payment Confirmed — Files Ready</b>', unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         with c1:
             buf = io.BytesIO()
             st.session_state.final_clean_rgba.save(buf, format="PNG", optimize=True)
-            st.download_button("⬇ PNG", buf.getvalue(), "signature.png", "image/png", use_container_width=True, type="primary")
+            st.download_button("⬇ Download PNG", buf.getvalue(), "signature.png", "image/png", use_container_width=True, type="primary")
         with c2:
             if DOCX_AVAILABLE:
                 doc = Document(); doc.add_heading("Signature Asset", level=1)
+                doc.add_paragraph("Place this image above your signature line. Choose Layout → In Front of Text.")
                 img_s = io.BytesIO(); st.session_state.final_clean_rgba.save(img_s, format="PNG")
                 doc.add_picture(img_s, width=Inches(2.5))
                 doc_buf = io.BytesIO(); doc.save(doc_buf)
-                st.download_button("⬇ DOCX", doc_buf.getvalue(), "signature.docx", use_container_width=True, type="secondary")
+                st.download_button("⬇ Download DOCX", doc_buf.getvalue(), "signature.docx", use_container_width=True, type="secondary")
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="payment-strip">', unsafe_allow_html=True)
-        st.markdown(f"<b>🔓 Unlock — {CONFIG.price}</b>", unsafe_allow_html=True)
+        st.markdown(f"<b>🔓 Unlock clean download — {CONFIG.price}</b>", unsafe_allow_html=True)
         bc1, bc2, bc3 = st.columns([1,1,1.5], gap="small")
         with bc1:
             if st.button("💳 Card", use_container_width=True):
